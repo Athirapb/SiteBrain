@@ -1,0 +1,13 @@
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.env
+frontend/dist
+backend/data/sitebrain.db*
+backend/data/uploads
+data
+*.pdf
+*.xlsx
+!backend/data/LLF_Checksheet.xlsx
+SiteBrain AI Copilot.html

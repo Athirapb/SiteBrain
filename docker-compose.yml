@@ -1,0 +1,23 @@
+# PostgreSQL for SiteBrain. Start with:  docker compose up -d db
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: sitebrain-db
+    environment:
+      POSTGRES_USER: sitebrain
+      POSTGRES_PASSWORD: sitebrain
+      POSTGRES_DB: sitebrain
+    ports:
+      - "5433:5432"   # host 5433 so it doesn't clash with a local PostgreSQL on 5432
+    volumes:
+      - sitebrain-pgdata:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sitebrain -d sitebrain"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  sitebrain-pgdata:

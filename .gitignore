@@ -1,0 +1,14 @@
+# secrets
+.env
+!.env.example
+# build / deps
+node_modules/
+.venv/
+__pycache__/
+.pytest_cache/
+frontend/dist/
+# local runtime data
+backend/data/sitebrain.db*
+backend/data/uploads/
+# company PIR/RCA records: keep out of git (import into the hosted DB from your machine instead)
+/data/

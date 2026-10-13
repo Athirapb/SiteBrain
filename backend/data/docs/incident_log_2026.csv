@@ -1,0 +1,8 @@
+Date,Equipment Type,Equipment,Symptom,Root Cause,Resolution
+2026-06-03,Pump,D4 Transfer Pump 1,Vibration and low discharge pressure,Impeller wrapped with fibres,Back-flushed line; cleaned impeller and suction strainer
+2026-06-19,Agitator,D1 Top Agitator 2,Abnormal sound and hot gearbox bearing,Gearbox output bearing wear,Replaced bearing set; changed oil; laser-aligned coupling
+2026-07-08,Compressor,LP 4,Knocking sound with oil level 50%,Drain plug gasket leak starving big-end bearing,Replaced gasket; topped up oil; inspected bearings
+2026-07-22,Scrubber,H2S Scrubber Vessel,dP sudden drop and media granules at filter skid,Top distributor mesh perimeter seal failure,Locked bypass; re-seated media; new perimeter seal; flushed skid
+2026-08-11,Decanter,Decanter 2,Vibration readings Critical after power trip,Solids build-up inside bowl,CIP flush at low speed then manual bowl clean
+2026-08-30,Chiller,Chiller,Gas outlet temperature 9°C and water carryover,Auto-drain trap stuck closed,Halted membrane feed; replaced drain trap; dried membranes
+2026-09-14,HWG,HWG 2,Squealing ID fan belt,Pulley misalignment after motor replacement,Aligned pulleys; replaced belt set; re-tensioned

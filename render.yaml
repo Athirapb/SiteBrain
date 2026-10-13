@@ -1,0 +1,18 @@
+# Render Blueprint: New → Blueprint → pick this repo. Fill the `sync: false` values in the dashboard.
+services:
+  - type: web
+    name: sitebrain
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL          # Neon connection string (postgresql://...?sslmode=require)
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DB_POOL_MAX
+        value: "5"
+      - key: SITEBRAIN_EMBED       # local embedding model needs more than the free 512 MB RAM; BM25 search still works
+        value: "off"
+      - key: SITEBRAIN_INCIDENTS_DIR
+        value: "off"
