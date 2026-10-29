@@ -1,18 +1,21 @@
-"""Seed the database: sites, users, areas and equipment (from the LLF checksheet workbook), KB, history.
+"""Seed the database: sites, the administrator, areas and equipment (from the LLF checksheet workbook), KB, history.
 
 Run `python -m app.seed --reset` to rebuild from scratch. The app seeds automatically on first start, and
 rebuilds a database created by an older schema version. History older than today is synthetic
 (deterministic random) so dashboards have trends to show.
 """
 import json
+import logging
 import random
-import secrets
 import sys
 from datetime import datetime, timedelta, timezone
 
 from . import config, db, knowledge
 from .catalog import SYMPTOMS, UNIT_NAMES, UNIT_ORDER, augment_with_process_assets, parse_checksheet
+from .auth import MIN_PASSWORD, check_password, hash_password
 from .brain import tree_for
+
+log = logging.getLogger("sitebrain")
 
 SITES = [
     ("GPS-BUU-04", "LLF Biogas Plant", "LLF-CBG-01", "Primary demo site"),
@@ -42,24 +45,13 @@ PROJECTS = [
 ]
 PROJECTS_AT = "2026-01-08T10:43:51Z"
 
-USERS = [
-    ("Field Operator 1", "operator1", "field_operator", "Field Operator", "GPS-BUU-04"),
-    ("Field Operator 2", "operator2", "field_operator", "Field Operator", "GPS-BUU-02"),
-    ("Expert 1", "expert1", "expert", "Level-3 Process Engineer", None),
-    ("Expert 2", "expert2", "expert", "Level-2 Maintenance Lead", None),
-]
-
-# Earlier demo users → current ones (control room and executive duties moved to the experts)
-RENAMED_USERS = {"tech": "operator1", "tech2": "operator2", "expert": "expert1", "expert2": "expert2"}
-RENAMED_NAMES = {"A. Nair": "Field Operator 1", "J. Paul": "Field Operator 2", "R. Iyer": "Expert 1",
-                 "S. Menon": "Expert 2", "M. Das": "Expert 1", "K. Rao": "Expert 1", "A. Rao": "Expert 2"}
-
 AREA_DESCRIPTIONS = {
     "BUU": "Gas train: H2S scrubber, filtration, blowers, LP/HP compressors, chiller, membranes",
     "HWG": "Hot water generation for digester heating",
     "SLS": "Decanters and screens separating digestate",
     "FEED": "Feed preparation, shredding and dosing",
-    "CDT": "Centrate / process storage tanks and pumps",
+    "PST": "Primary sludge storage, agitation and transfer pumps",
+    "CDT": "Concentrated digestate storage, agitators and transfer pumps",
 }
 
 SHIFT_START = {"A": 6, "B": 14, "C": 22}
@@ -76,6 +68,9 @@ def current_shift() -> tuple[str, datetime]:
 
 def seed(reset: bool = False) -> None:
     version = db.schema_version()
+    if not reset and version in MIGRATIONS:
+        migrate(version)
+        version = db.SCHEMA_VERSION
     if reset or (version is not None and version != db.SCHEMA_VERSION):
         if not reset:
             print(f"Database schema v{version} is older than v{db.SCHEMA_VERSION}; rebuilding it …")
@@ -83,16 +78,13 @@ def seed(reset: bool = False) -> None:
     db.init_schema()
     seed_projects()
     if db.q1("SELECT code FROM sites LIMIT 1"):
-        migrate_users()
+        ensure_admin()
         return
     random.seed(42)
     print("Seeding SiteBrain database …")
 
     for code, name, proj, loc in SITES:
         db.insert("sites", {"code": code, "name": name, "project_code": proj, "location": loc, "commissioned": "2025-03-01"})
-    for name, uname, role, title, site in USERS:
-        db.insert("users", {"name": name, "username": uname, "role": role, "title": title, "site_code": site,
-                            "token": secrets.token_hex(16)})
 
     catalog = augment_with_process_assets(parse_checksheet(config.CHECKSHEET_XLSX))
     print(f"  parsed {len(catalog)} equipment from {config.CHECKSHEET_XLSX.name}")
@@ -118,6 +110,7 @@ def seed(reset: bool = False) -> None:
     print(f"  {sum(len(a) for a in areas.values())} areas, {sum(len(e) for e in equipment.values())} equipment")
 
     _seed_history(equipment, areas)
+    ensure_admin()
     res = knowledge.train()
     print(f"  knowledge brain: {res['cases']} cases, {res['documents']} documents, {res['root_causes']} root causes")
     db.set_counter("schema_version", db.SCHEMA_VERSION)
@@ -131,36 +124,102 @@ def seed_projects() -> None:
                    "ON CONFLICT DO NOTHING", [(*p, PROJECTS_AT, PROJECTS_AT) for p in PROJECTS])
 
 
-def migrate_users() -> None:
-    """Bring a database seeded with the earlier six demo users (four roles) to the two-role model. Idempotent.
+def _migrate_v2(_: None = None) -> None:
+    """v2 → v3, keeping every issue, case and document. Users are identified by email and only the
+    administrator is seeded, so the four demo users go (their names stay in the records as text). PST becomes its
+    own area, split from CDT & PST, and the areas follow the plant's process order."""
+    with db.pool().connection() as c, c.transaction():
+        c.execute("UPDATE sessions SET user_id=NULL")
+        c.execute("UPDATE escalations SET claimed_by=NULL")
+        c.execute("DELETE FROM users")
+        c.execute("ALTER TABLE users DROP COLUMN IF EXISTS username")
+        for col in ("email TEXT UNIQUE", "project_id INTEGER", "area_code TEXT", "password_hash TEXT",
+                    "active BOOLEAN NOT NULL DEFAULT TRUE", "created_at TEXT"):
+            c.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col}")
+        c.execute("ALTER TABLE users ALTER COLUMN email SET NOT NULL")
+        c.execute("ALTER TABLE users ALTER COLUMN password_hash SET NOT NULL")
+        for site in [r["code"] for r in c.execute("SELECT code FROM sites").fetchall()]:
+            cdt = c.execute("SELECT id FROM areas WHERE site_code=%s AND code='CDT'", (site,)).fetchone()
+            pst = c.execute("SELECT id FROM areas WHERE site_code=%s AND code='PST'", (site,)).fetchone()
+            if cdt and not pst:
+                pst = c.execute("INSERT INTO areas (site_code, code, name, description, sort_order) "
+                                "VALUES (%s, 'PST', %s, %s, 0) RETURNING id",
+                                (site, UNIT_NAMES["PST"], AREA_DESCRIPTIONS["PST"])).fetchone()
+                moved = [r["id"] for r in c.execute("SELECT id FROM equipment WHERE area_id=%s AND name ILIKE 'PST%%'",
+                                                    (cdt["id"],)).fetchall()]
+                for table in ("equipment", "sessions", "escalations", "interlocks"):
+                    col = "id" if table == "equipment" else "equipment_id"
+                    c.execute(f"UPDATE {table} SET area_id=%s WHERE {col} = ANY(%s)", (pst["id"], moved))
+                c.execute("UPDATE areas SET name=%s, description=%s WHERE id=%s",
+                          (UNIT_NAMES["CDT AND PST"], AREA_DESCRIPTIONS["CDT"], cdt["id"]))
+            for order, code in enumerate(UNIT_ORDER, 1):
+                c.execute("UPDATE areas SET sort_order=%s WHERE site_code=%s AND code=%s", (order, site, code))
+            c.execute("UPDATE areas SET sort_order=sort_order+100 WHERE site_code=%s AND NOT (code = ANY(%s))",
+                      (site, UNIT_ORDER))
+        c.execute("UPDATE counters SET value=3 WHERE name='schema_version'")
+    print("Migrated the database to schema v3 (email sign-in, PST area); issues, cases and documents kept")
 
-    Users are renamed in place (ids, tokens and history links survive), the control-room operator and executive
-    accounts are removed, and their names in session, chat, escalation and safety records are updated. The audit
-    log is append-only by design and keeps the names it was written with.
-    """
-    if not db.q1("SELECT id FROM users WHERE role IN ('technician', 'operator', 'executive') LIMIT 1"):
+
+def _migrate_v3(_: None = None) -> None:
+    """v3 → v4: sign-in moved to Keycloak single sign-on (later dropped again in v5)."""
+    with db.pool().connection() as c, c.transaction():
+        c.execute("ALTER TABLE users DROP COLUMN IF EXISTS password_hash")
+        c.execute("UPDATE users SET token=NULL")
+        c.execute("UPDATE counters SET value=4 WHERE name='schema_version'")
+    print("Migrated the database to schema v4")
+
+
+def _migrate_v4(_: None = None) -> None:
+    """v4 → v5: back to email and password sign-in (single sign-on was dropped). Passwords are set by the
+    administrator; the administrator's own comes from .env."""
+    with db.pool().connection() as c, c.transaction():
+        c.execute("ALTER TABLE users DROP COLUMN IF EXISTS keycloak_sub")
+        c.execute("ALTER TABLE users DROP COLUMN IF EXISTS id_token")
+        c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT")
+        c.execute("DROP TABLE IF EXISTS auth_flows")
+        c.execute("UPDATE users SET token=NULL")
+        c.execute("UPDATE counters SET value=5 WHERE name='schema_version'")
+    print("Migrated the database to schema v5 (email and password sign-in)")
+
+
+MIGRATIONS = {2: _migrate_v2, 3: _migrate_v3, 4: _migrate_v4}
+
+
+def migrate(version: int) -> None:
+    while version in MIGRATIONS:
+        MIGRATIONS[version]()
+        version += 1
+    db.init_schema()
+
+
+def ensure_admin() -> None:
+    """The administrator from .env (runs on every start): created when no user has SITEBRAIN_ADMIN_EMAIL, and
+    given SITEBRAIN_ADMIN_PASSWORD, so the .env file is where the administrator's password is kept and changed.
+    Nobody else is seeded: the administrator adds the field operators and experts and sets their passwords."""
+    email, password = config.ADMIN_EMAIL, config.ADMIN_PASSWORD
+    if not email:
+        if not db.q1("SELECT id FROM users WHERE role='admin' LIMIT 1"):
+            log.warning("No administrator: set SITEBRAIN_ADMIN_EMAIL and SITEBRAIN_ADMIN_PASSWORD in backend/.env")
         return
-    print("Migrating demo users to the field operator / expert roles …")
-    by_username = {u[1]: u for u in USERS}
-    for old, new in RENAMED_USERS.items():
-        name, uname, role, title, site = by_username[new]
-        db.ex("UPDATE users SET name=?, username=?, role=?, title=?, site_code=? WHERE username=?",
-              (name, uname, role, title, site, old))
-    db.ex("DELETE FROM users WHERE role IN ('technician', 'operator', 'executive')")
-    for name, uname, role, title, site in USERS:  # any of the current users that did not exist before
-        if not db.q1("SELECT id FROM users WHERE username=?", (uname,)):
-            db.insert("users", {"name": name, "username": uname, "role": role, "title": title, "site_code": site,
-                                "token": secrets.token_hex(16)})
-    text_cols = [("sessions", "report", True), ("sessions", "state", True), ("messages", "payload", True),
-                 ("escalations", "payload", True), ("escalations", "expert_name", False),
-                 ("escalations", "summary", False), ("interlocks", "acknowledged_by", False),
-                 ("interlocks", "released_by", False), ("overrides", "requested_by", False),
-                 ("overrides", "decided_by", False), ("outbox", "body", False)]
-    for old, new in RENAMED_NAMES.items():
-        for table, col, is_json in text_cols:
-            cast = "::jsonb" if is_json else ""
-            db.ex(f"UPDATE {table} SET {col} = replace({col}::text, ?, ?){cast} WHERE {col}::text LIKE ?",
-                  (old, new, f"%{old}%"))
+    if len(password) < MIN_PASSWORD:
+        log.warning("SITEBRAIN_ADMIN_PASSWORD is %s: the administrator can't sign in until it has at least %d characters",
+                    "empty" if not password else "too short", MIN_PASSWORD)
+    u = db.q1("SELECT * FROM users WHERE email=?", (email,))
+    if not u:
+        db.insert("users", {"name": config.ADMIN_NAME, "email": email, "role": "admin", "title": "Administrator",
+                            "site_code": None, "active": True, "created_at": db.now_iso(),
+                            "password_hash": hash_password(password) if len(password) >= MIN_PASSWORD else None})
+        log.info("Created the administrator %s", email)
+        return
+    if u["role"] != "admin":
+        log.warning("%s (SITEBRAIN_ADMIN_EMAIL) is a %s account, not the administrator", email, u["role"])
+        return
+    want = password if len(password) >= MIN_PASSWORD else None
+    if want and not check_password(want, u["password_hash"]):
+        db.update("users", "id", u["id"], {"password_hash": hash_password(want), "token": None})
+        log.info("Administrator password updated from SITEBRAIN_ADMIN_PASSWORD")
+    elif not want and u["password_hash"]:
+        db.update("users", "id", u["id"], {"password_hash": None, "token": None})
 
 
 def _symptoms_for(cause: dict) -> list[str]:

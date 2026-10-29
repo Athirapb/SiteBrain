@@ -732,7 +732,7 @@ CONDITIONS = [
                "Always flush decanters at low speed before stopping and after any trip.",
                "Record every setpoint change (feed, polymer, differential, pond, counter-pressure) in the setpoint log.",
                "Polymer powder is extremely slippery when wet - clean spills immediately."]},
-    {"id": "CDT", "title": "CDT & PST storage - normal operating conditions", "areas": ["CDT"],
+    {"id": "CDT", "title": "CDT & PST storage - normal operating conditions", "areas": ["CDT", "PST"],
      "params": [
          ("PST level", "Between 30 % and 85 % of working volume",
           "Low level starves the decanter feed pumps; high level risks overflow",

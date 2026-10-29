@@ -1,29 +1,42 @@
-"""Auth (demo sign-in) and analytics endpoints."""
+"""Auth (email and password sign-in) and analytics endpoints."""
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import analytics, db
-from ..auth import current_user, public_user, require, site_scope
+from ..auth import ROLE_LABEL, check_password, current_user, public_user, require, site_scope
 
 router = APIRouter(prefix="/api", tags=["auth", "analytics"])
 
 
-@router.get("/auth/users")
-def demo_users():
-    return [public_user(u) for u in db.q("SELECT * FROM users ORDER BY id")]
-
-
 class LoginIn(BaseModel):
-    username: str
+    email: str
+    password: str
+    account_type: str = "field_operator"  # the sign-in card used: field_operator | expert | admin
 
 
 @router.post("/auth/login")
 def login(body: LoginIn):
-    u = db.q1("SELECT * FROM users WHERE username=?", (body.username.strip().lower(),))
-    if not u:
-        raise HTTPException(401, "Unknown user")
+    u = db.q1("SELECT * FROM users WHERE email=?", (body.email.strip().lower(),))
+    if not u or not check_password(body.password, u["password_hash"]):
+        raise HTTPException(401, "Email or password is incorrect")
+    if not u["active"]:
+        raise HTTPException(403, "This account is switched off. Contact your administrator.")
+    if body.account_type != u["role"]:
+        label = ROLE_LABEL.get(u["role"], u["role"])
+        raise HTTPException(403, f"This is {'an' if label[0] in 'AEIOU' else 'a'} {label} account. Use the {label} sign-in.")
+    token = secrets.token_hex(24)
+    db.update("users", "id", u["id"], {"token": token})
     db.audit(u["name"], u["role"], "auth.login", None, {}, u["site_code"])
-    return {"token": u["token"], "user": public_user(u)}
+    return {"token": token, "user": public_user(u)}
+
+
+@router.post("/auth/logout")
+def logout(user: dict = Depends(current_user)):
+    db.update("users", "id", user["id"], {"token": None})
+    db.audit(user["name"], user["role"], "auth.logout", None, {}, user["site_code"])
+    return {"ok": True}
 
 
 @router.get("/auth/me")

@@ -1,8 +1,10 @@
 """Copilot diagnostic sessions and case history."""
+import json
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
-from .. import config, db, diagnosis, knowledge, llm, telemetry, topology
+from .. import config, db, diagnosis, knowledge, llm, media, telemetry, topology
 from ..auth import check_site, current_user, require, site_scope
 from ..brain import tree_for
 from ..catalog import KIND_ICON, report_hint
@@ -18,16 +20,16 @@ def _guard(fn, *a, **kw):
 
 
 def stage_of(s: dict) -> dict:
-    """Issue Report (0) → Fishbone (1) → 5-Why (2) → Resolution (3); expert support runs alongside."""
+    """Issue Reporting (0) → Quick Analysis (1) → Detailed Analysis (2) → Resolution (3). Expert support is one of
+    the two routes to a resolution, so an escalated issue is at Resolution."""
     phase = s["state"].get("phase") or "diagnose"
-    if s["status"] in ("resolved", "closed") or s["identified"] or phase in ("fix", "verify", "done"):
+    if s["status"] in ("resolved", "closed") or s["mode"] == "expert" or s["identified"] \
+            or phase in ("fix", "verify", "done"):
         idx = 3
     elif phase == "why" or s["state"].get("rca"):
         idx = 2
-    elif s["turns"] > 0 or s["state"].get("answers"):
-        idx = 1
     else:
-        idx = 0
+        idx = 1  # the report is in: the quick analysis runs from the first message
     return {"index": idx, "expert": s["mode"] == "expert", "resolved": s["status"] in ("resolved", "closed")}
 
 
@@ -68,6 +70,7 @@ def session_view(sid: str, user: dict) -> dict:
         "documents": docs,
         "policy": {"max_turns": config.MAX_DIAGNOSTIC_TURNS, "confidence": config.CONFIDENCE_THRESHOLD},
         "llm": llm.status(),
+        "media": media.enabled() and s["mode"] == "bot",  # attachments are read while SiteBrain troubleshoots
         "area": {k: area[k] for k in ("id", "code", "name")},
         "equipment": {k: eq[k] for k in ("id", "name", "kind", "tag", "unit", "unit_name")} if eq else None,
         "icon": KIND_ICON.get(kind, "map-marker-outline"),
@@ -129,14 +132,41 @@ async def _read_files(files: list[UploadFile]) -> list[dict]:
 
 
 @router.post("/{sid}/files")
-async def share_files(sid: str, text: str = Form(""), files: list[UploadFile] = File(default=[]),
-                      user: dict = Depends(require("copilot"))):
-    """Photos, PDFs, spreadsheets and other files shared in the chat, with an optional message."""
+async def share_files(sid: str, text: str = Form(""), caption: str = Form(""), check_id: str = Form(""),
+                      files: list[UploadFile] = File(default=[]), user: dict = Depends(require("copilot"))):
+    """Photos, videos, voice notes and other files shared in the chat, with an optional message. A caption files
+    them as evidence (for the report, or the condition check `check_id`) without a reply from SiteBrain. While
+    SiteBrain troubleshoots, every file is read: voice notes transcribed, photos and videos described (and matched
+    to the pending check), documents summarised."""
     s = _guard(diagnosis.load_session, sid)
     check_site(user, s["site_code"])
-    saved = _guard(diagnosis.save_files, sid, user, await _read_files(files))
-    _guard(diagnosis.share_files, sid, user, text, saved)
+    raw = await _read_files(files)
+    saved = _guard(diagnosis.save_files, sid, user, raw)
+    _guard(diagnosis.share_files, sid, user, text, saved, caption, raw, check_id or None)
     return session_view(sid, user)
+
+
+@router.post("/transcribe")
+async def transcribe(file: UploadFile = File(...), options: str = Form(""), multi: bool = Form(False),
+                     user: dict = Depends(require("copilot"))):
+    """What was said in a short recording (any language; English included). With `options` (a JSON list of the
+    answers on screen), `matches` are the ones the person picked by voice."""
+    if not media.enabled():
+        raise HTTPException(503, "Voice notes can't be transcribed: no speech-to-text service is set up")
+    data = await file.read(diagnosis.MAX_ATTACHMENT_BYTES + 1)
+    if len(data) > diagnosis.MAX_ATTACHMENT_BYTES:
+        raise HTTPException(400, "The voice note is over 10 MB")
+    try:
+        t = media.transcribe(data, file.filename or "voice-note.webm")
+    except Exception as e:  # noqa: BLE001 - the service is down or rejected the file
+        raise HTTPException(502, "The voice note couldn't be transcribed. Please type it instead.") from e
+    if options:
+        try:
+            opts = [str(o) for o in json.loads(options)][:30]
+        except ValueError:
+            raise HTTPException(400, "options must be a JSON list") from None
+        t["matches"] = diagnosis.match_spoken(opts, t["english"] or t["text"], multi)
+    return t
 
 
 @router.get("/{sid}/files/{aid}")
@@ -150,14 +180,23 @@ def get_file(sid: str, aid: int, user: dict = Depends(current_user)):
     return file_response(a)
 
 
+@router.get("/{sid}/chat-summary")
+def chat_summary(sid: str, user: dict = Depends(require("copilot"))):
+    """The summary of the chat so far that goes to the expert, shown to the operator before they escalate."""
+    s = _guard(diagnosis.load_session, sid)
+    check_site(user, s["site_code"])
+    return {"summary": _guard(diagnosis.chat_summary, sid)}
+
+
 @router.post("/{sid}/escalate")
-async def escalate(sid: str, description: str = Form(""), files: list[UploadFile] = File(default=[]),
-                   user: dict = Depends(require("copilot"))):
-    """The field operator hands the issue to an expert, with a description and attachments for detailed analysis."""
+async def escalate(sid: str, description: str = Form(""), summary: str = Form(""),
+                   files: list[UploadFile] = File(default=[]), user: dict = Depends(require("copilot"))):
+    """The field operator hands the issue to an expert, with a description and attachments for detailed analysis,
+    and the summary of the chat (as they saw and maybe edited it)."""
     s = _guard(diagnosis.load_session, sid)
     check_site(user, s["site_code"])
     attachments = await _read_files(files)
-    _guard(diagnosis.escalate, sid, user, f"Escalated by {user['name']}", description, attachments)
+    _guard(diagnosis.escalate, sid, user, f"Escalated by {user['name']}", description, attachments, summary)
     return session_view(sid, user)
 
 
@@ -214,15 +253,22 @@ def expert_message(sid: str, body: ExpertIn, user: dict = Depends(require("esc.w
 @router.get("")
 def history(site: str = Depends(site_scope), user: dict = Depends(require("history")),
             by: str = Query("All"), equipment_id: str | None = None, area_id: int | None = None,
-            project_id: int | None = None,
+            project_id: int | None = None, mine: bool = False,
             status: str | None = None, limit: int = Query(200, le=1000)):
     sql = ("SELECT s.id, s.equipment_id, s.area_id, s.status, s.mode, s.turns, s.symptom, s.root_cause, s.resolved_by, "
            "s.severity, s.created_at, s.resolved_at, COALESCE(e.name, a.name) AS eq_name, a.name AS unit_name, e.kind, "
            "s.report->>'project' AS project, s.report->>'project_code' AS project_code, "
            "(s.report->>'project_id')::int AS project_id, s.report->>'reported_by' AS reported_by, "
-           "(s.equipment_id IS NULL) AS area_level FROM sessions s JOIN areas a ON a.id=s.area_id "
+           "(s.equipment_id IS NULL) AS area_level, "
+           # the expert spoke last: the reporter has a reply to read
+           "COALESCE((SELECT (m.payload->>'expert')::boolean FROM messages m WHERE m.session_id=s.id "
+           "AND (m.type='user' OR m.payload->>'expert'='true') ORDER BY m.id DESC LIMIT 1), false) AS expert_replied "
+           "FROM sessions s JOIN areas a ON a.id=s.area_id "
            "LEFT JOIN equipment e ON e.id=s.equipment_id WHERE s.site_code=?")
     params: list = [site]
+    if mine:
+        sql += " AND s.user_id=?"
+        params.append(user["id"])
     if by in ("SiteBrain", "Expert"):
         sql += " AND s.resolved_by=?"
         params.append(by)

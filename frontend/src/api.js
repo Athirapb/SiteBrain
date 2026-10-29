@@ -1,7 +1,7 @@
 // Thin fetch wrapper: bearer token + active site appended to every request.
 const state = { token: null, site: null };
 // Empty = same origin (dev proxy, or backend serving the built UI)
-const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "") || window.location.origin;
+export const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "") || window.location.origin;
 
 try {
   state.token = localStorage.getItem("sb.token");

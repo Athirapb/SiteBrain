@@ -1,28 +1,59 @@
-"""Demo authentication and role-based access control (SRS §2).
+"""Authentication and role-based access control (SRS §2).
 
-Two roles: the field operator reports and troubleshoots issues on site; the L2/L3 technical expert takes
-escalations and also owns the control room (interlock release, override approval), dashboards, plant setup and
-knowledge editing — so the person who requests a bypass is never the one who approves it.
-Site-bound users only see their Site_ID; fleet users pick a site per request (SRS §6 tenant isolation).
+Three roles: the field operator (SIC, engineers, plant manager) reports and troubleshoots issues on site; the
+technical expert (central O&M team, design engineers) answers escalations; the administrator adds and manages
+those accounts. Everyone signs in with email and password. Nobody is seeded except the administrator, whose email
+and password come from .env; the administrator creates the other users and sets their passwords. Site-bound users only see their Site_ID; fleet users pick a site per request (SRS §6).
 """
+import hashlib
+import hmac
+import secrets
+
 from fastapi import Depends, Header, HTTPException, Query
 
 from . import db
 
+ROLES = ("field_operator", "expert", "admin")
+ROLE_LABEL = {"field_operator": "Field Operator", "expert": "Technical Expert", "admin": "Administrator"}
+
 PERMS = {
     "field_operator": {"copilot", "kb.read", "history", "esc.read"},
     "expert": {"copilot", "kb.read", "kb.write", "history", "esc.read", "esc.work", "dash", "control", "config"},
+    "admin": {"admin"},
 }
 
 
+MIN_PASSWORD = 8
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def check_password(password: str, stored: str | None) -> bool:
+    try:
+        algo, salt, digest = (stored or "").split("$")
+    except ValueError:
+        return False
+    if algo != "scrypt":
+        return False
+    got = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=2 ** 14, r=8, p=1)
+    return hmac.compare_digest(got.hex(), digest)
+
+
 def public_user(u: dict) -> dict:
-    return {"id": u["id"], "name": u["name"], "username": u["username"], "role": u["role"], "title": u["title"],
-            "site_code": u["site_code"], "permissions": sorted(PERMS.get(u["role"], set()))}
+    return {"id": u["id"], "name": u["name"], "email": u["email"], "role": u["role"],
+            "role_label": ROLE_LABEL.get(u["role"], u["role"]), "title": u["title"], "site_code": u["site_code"],
+            "project_id": u["project_id"], "area_code": u["area_code"], "active": u["active"],
+            "created_at": u["created_at"], "has_password": bool(u.get("password_hash")),
+            "permissions": sorted(PERMS.get(u["role"], set()))}
 
 
 def current_user(authorization: str = Header(default="")) -> dict:
     token = authorization.removeprefix("Bearer ").strip()
-    u = db.q1("SELECT * FROM users WHERE token=?", (token,)) if token else None
+    u = db.q1("SELECT * FROM users WHERE token=? AND active", (token,)) if token else None
     if not u:
         raise HTTPException(401, "Not signed in")
     return u

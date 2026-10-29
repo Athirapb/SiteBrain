@@ -395,12 +395,22 @@ def profile_pending(pause: float = 30.0) -> int:
     return done
 
 
-# BM25 index and embedding matrix cached in memory, rebuilt lazily after ingestion
+# BM25 index and embedding matrix cached in memory, rebuilt lazily after ingestion. _INDEX holds one finished
+# snapshot under "idx" (clear() drops it): a request keeps the snapshot it started with, so a rebuild running on
+# another thread (the incident import, the embedding backfill) never hands it a half-built index.
 _INDEX: dict = {}
+
+
+def _index() -> dict:
+    idx = _INDEX.get("idx")
+    if idx is None:
+        idx = _build_index()
+        _INDEX["idx"] = idx
+    return idx
 RRF_K = 60  # reciprocal rank fusion constant: a chunk's fused score is sum(1 / (RRF_K + rank)) over both rankings
 
 
-def _build_index():
+def _build_index() -> dict:
     rows = db.q("SELECT c.id, c.doc_id, c.text, c.embedding, c.embed_model, d.title, d.kind, d.site_code, "
                 "d.equipment_kinds, d.summary "
                 "FROM chunks c JOIN documents d ON d.id=c.doc_id ORDER BY c.id")
@@ -412,14 +422,14 @@ def _build_index():
     model = embeddings.model_name()
     vec_rows = [i for i, r in enumerate(rows) if r["embedding"] is not None and r["embed_model"] == model]
     matrix = np.stack([embeddings.from_bytes(rows[i]["embedding"]) for i in vec_rows]) if vec_rows else None
-    _INDEX.update({"docs": docs, "df": df, "avg": avg, "n": len(docs), "vec_rows": vec_rows, "matrix": matrix})
+    return {"docs": docs, "df": df, "avg": avg, "n": len(docs), "vec_rows": vec_rows, "matrix": matrix}
 
 
-def _bm25(qt: list[str], allowed: list[bool]) -> list[tuple[float, int]]:
+def _bm25(idx: dict, qt: list[str], allowed: list[bool]) -> list[tuple[float, int]]:
     k1, b = 1.4, 0.75
-    n, df, avg = _INDEX["n"], _INDEX["df"], _INDEX["avg"]
+    n, df, avg = idx["n"], idx["df"], idx["avg"]
     scored = []
-    for i, (_, tf) in enumerate(_INDEX["docs"]):
+    for i, (_, tf) in enumerate(idx["docs"]):
         if not allowed[i]:
             continue
         dl = sum(tf.values())
@@ -434,17 +444,17 @@ def _bm25(qt: list[str], allowed: list[bool]) -> list[tuple[float, int]]:
     return sorted(scored, key=lambda x: -x[0])
 
 
-def _semantic(query: str, allowed: list[bool], limit: int) -> list[tuple[float, int]]:
-    if _INDEX["matrix"] is None:
+def _semantic(idx: dict, query: str, allowed: list[bool], limit: int) -> list[tuple[float, int]]:
+    if idx["matrix"] is None:
         return []
     qv = embeddings.embed([query], query=True)
     if qv is None:
         return []
-    sims = _INDEX["matrix"] @ qv[0]
+    sims = idx["matrix"] @ qv[0]
     order = np.argsort(-sims)
     out = []
     for j in order:
-        i = _INDEX["vec_rows"][j]
+        i = idx["vec_rows"][j]
         if allowed[i]:
             out.append((float(sims[j]), i))
             if len(out) >= limit:
@@ -454,14 +464,13 @@ def _semantic(query: str, allowed: list[bool], limit: int) -> list[tuple[float, 
 
 def search(query: str, site_code: str | None = None, k: int = 4) -> list[dict]:
     """Hybrid search: BM25 keyword ranking and embedding similarity, merged by reciprocal rank fusion."""
-    if not _INDEX:
-        _build_index()
-    if not _INDEX["n"] or not query.strip():
+    idx = _index()
+    if not idx["n"] or not query.strip():
         return []
-    allowed = [not (row["site_code"] and site_code and row["site_code"] != site_code) for row, _ in _INDEX["docs"]]
+    allowed = [not (row["site_code"] and site_code and row["site_code"] != site_code) for row, _ in idx["docs"]]
     qt = tokenize(query)
-    lexical = _bm25(qt, allowed)[:50] if qt else []
-    semantic = _semantic(query, allowed, 50)
+    lexical = _bm25(idx, qt, allowed)[:50] if qt else []
+    semantic = _semantic(idx, query, allowed, 50)
     lex_rank = {i: r for r, (_, i) in enumerate(lexical)}
     sem = {i: (r, s) for r, (s, i) in enumerate(semantic)}
     fused: dict[int, float] = {}
@@ -473,7 +482,7 @@ def search(query: str, site_code: str | None = None, k: int = 4) -> list[dict]:
     best = 2 / (RRF_K + 1)  # top of both rankings
     out, seen = [], set()
     for i in sorted(fused, key=lambda i: -fused[i]):
-        row = _INDEX["docs"][i][0]
+        row = idx["docs"][i][0]
         if (row["doc_id"], row["text"][:40]) in seen:
             continue
         seen.add((row["doc_id"], row["text"][:40]))

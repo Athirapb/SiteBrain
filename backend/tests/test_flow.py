@@ -8,6 +8,9 @@ os.environ["DATABASE_URL"] = os.getenv("TEST_DATABASE_URL",
                                        "postgresql://sitebrain:sitebrain@localhost:5433/sitebrain_test")
 os.environ["SITEBRAIN_LLM"] = "off"
 os.environ["SITEBRAIN_INCIDENTS_DIR"] = "off"  # tests import their own sample reports
+os.environ["SITEBRAIN_ADMIN_EMAIL"] = "admin@test.local"
+os.environ["SITEBRAIN_ADMIN_PASSWORD"] = "admin-pass-123"
+os.environ["SITEBRAIN_MEDIA"] = "off"  # test_media_* switch it on with stand-ins for speech-to-text and vision
 os.environ["SITEBRAIN_SURVEY"] = "0"  # one check at a time; test_condition_survey_* switch the survey on
 
 import pytest
@@ -18,15 +21,43 @@ from app.diagnosis import CANT, DONE, HOW, NOT_SURE, NOT_WORKING, SKIP_WHY, STEP
 from app.main import app
 
 
+# Nobody but the administrator is seeded: the tests add their users the way the administrator would
+TEST_USERS = [
+    ("Field Operator 1", "operator1", "field_operator", "Shift In-Charge (SIC)", "GPS-BUU-04"),
+    ("Field Operator 2", "operator2", "field_operator", "Mechanical Engineer", "GPS-BUU-02"),
+    ("Expert 1", "expert1", "expert", "Central O&M", None),
+    ("Expert 2", "expert2", "expert", "Design Engineer", None),
+]
+
+
+PASSWORD = "pass-1234"
+
+
+def _token(c, email, password, account_type):
+    r = c.post("/api/auth/login", json={"email": email, "password": password, "account_type": account_type})
+    assert r.status_code == 200, r.text
+    return {"Authorization": "Bearer " + r.json()["token"]}
+
+
+def admin_login(c):
+    return _token(c, "admin@test.local", "admin-pass-123", "admin")
+
+
 @pytest.fixture(scope="module")
 def client():
     seed.seed(reset=True)
     with TestClient(app) as c:
+        adm = admin_login(c)
+        for name, uname, role, title, site in TEST_USERS:
+            r = c.post("/api/admin/users", headers=adm, json={"name": name, "email": f"{uname}@test.local", "role": role,
+                                                              "title": title, "site_code": site, "password": PASSWORD})
+            assert r.status_code == 200, r.text
         yield c
 
 
 def login(c, username):
-    return {"Authorization": "Bearer " + c.post("/api/auth/login", json={"username": username}).json()["token"]}
+    role = next(u[2] for u in TEST_USERS if u[1] == username)
+    return _token(c, f"{username}@test.local", PASSWORD, role)
 
 
 def area_id(c, h, code):
@@ -52,7 +83,7 @@ def last_replies(v):
 def test_workbook_seeds_the_equipment_inventory():
     items = catalog.parse_checksheet(config.CHECKSHEET_XLSX)
     assert len(items) == 111
-    assert {i["unit"] for i in items} == {"BUU", "D1", "D2", "D3", "D4", "HWG", "SLS", "FEED", "CDT"}
+    assert {i["unit"] for i in items} == {"BUU", "D1", "D2", "D3", "D4", "HWG", "SLS", "FEED", "PST", "CDT"}
     lp1 = next(i for i in items if i["name"] == "LP 1")
     assert lp1["kind"] == "Compressor" and "checks" not in lp1
     assert {"H2S Scrubber Vessel", "Gas Filtration Skid", "Membrane Upgrader"} <= {
@@ -82,7 +113,9 @@ def test_rbac(client):
     assert client.get("/api/analytics/daily", headers=ex).status_code == 200
     assert client.get("/api/control/interlocks", headers=ex).status_code == 200
     from app import db
-    assert {u["role"] for u in db.q("SELECT role FROM users")} == {"field_operator", "expert"}
+    assert {u["role"] for u in db.q("SELECT role FROM users")} == {"field_operator", "expert", "admin"}
+    assert client.get("/api/admin/users", headers=tech).status_code == 403
+    assert client.get("/api/admin/users", headers=ex).status_code == 403
 
 
 def test_report_needs_a_project_a_place_and_a_symptom(client):
@@ -395,6 +428,20 @@ def test_only_the_escalate_button_escalates_with_description_and_attachments(cli
                       headers=login(client, "operator2")).status_code == 403  # another site's operator
 
 
+def test_escalation_carries_a_summary_of_the_chat(client):
+    h, ex = login(client, "operator1"), login(client, "expert1")
+    sid = report(client, h, equipment_id="GPS-BUU-04|BUU|LP 3", symptoms=["noise"])["session"]["id"]
+    shown = client.get(f"/api/sessions/{sid}/chat-summary", headers=h).json()["summary"]
+    assert "LP 3" in shown, "the operator sees the summary before escalating"
+    v = client.post(f"/api/sessions/{sid}/escalate", headers=h, data={"summary": "Edited by the operator"}).json()
+    assert next(m for m in v["messages"] if m["type"] == "escalation")["summary"] == "Edited by the operator"
+    x = client.get(f"/api/escalations/{v['escalation']['ticket']}", headers=ex).json()
+    assert x["payload"]["chat_summary"] == "Edited by the operator" and "Edited by the operator" in x["outbox"][0]["body"]
+    sid = report(client, h, equipment_id="GPS-BUU-04|BUU|LP 4", symptoms=["noise"])["session"]["id"]
+    v = client.post(f"/api/sessions/{sid}/escalate", headers=h).json()
+    assert "LP 4" in next(m for m in v["messages"] if m["type"] == "escalation")["summary"], "written when none is sent"
+
+
 def test_escalation_attachments_are_limited_and_html_never_renders(client):
     from app import diagnosis
     h = login(client, "operator1")
@@ -457,19 +504,215 @@ def test_plant_setup_manages_areas_and_equipment(client):
     assert client.delete(f"/api/areas/{empty['id']}", headers=op).status_code == 200
 
 
-def test_old_demo_users_migrate_to_two_roles(client):
-    from app import db, seed
-    db.ex("UPDATE users SET name='A. Nair', username='tech', role='technician' WHERE username='operator1'")
-    db.insert("users", {"name": "M. Das", "username": "operator", "role": "operator", "title": "Control Room Operator",
-                        "site_code": "GPS-BUU-04", "token": "old-op"})
-    db.ex("UPDATE messages SET payload = jsonb_set(payload, '{author}', '\"A. Nair\"') WHERE id = "
-          "(SELECT MIN(id) FROM messages WHERE type='report')")
-    seed.migrate_users()
-    users = {u["username"]: u for u in db.q("SELECT * FROM users")}
-    assert set(users) == {"operator1", "operator2", "expert1", "expert2"}
-    assert users["operator1"]["name"] == "Field Operator 1" and users["operator1"]["role"] == "field_operator"
-    assert not db.q1("SELECT id FROM messages WHERE payload::text LIKE '%A. Nair%'")
-    seed.migrate_users()  # idempotent
+def test_pst_is_its_own_area_and_areas_follow_the_process_order():
+    items = catalog.parse_checksheet(config.CHECKSHEET_XLSX)
+    assert {i["name"] for i in items if i["unit"] == "PST"} == {"PST Pump 1", "PST Pump 2", "PST Agitator"}
+    assert not [i for i in items if i["unit"] == "CDT" and i["name"].startswith("PST")]
+
+
+def test_area_order(client):
+    codes = [a["code"] for a in client.get("/api/areas", headers=login(client, "operator1")).json()]
+    assert codes[:10] == ["FEED", "PST", "D1", "D2", "D3", "D4", "HWG", "CDT", "SLS", "BUU"]  # then any added later
+
+
+def test_only_the_admin_is_seeded_and_sets_the_passwords(client, monkeypatch):
+    from app import db
+    admin = db.q1("SELECT * FROM users WHERE role='admin'")
+    assert admin["email"] == "admin@test.local" and db.q1("SELECT COUNT(*) n FROM users WHERE role='admin'")["n"] == 1
+    adm = admin_login(client)
+    # sign-in checks the password and the account type
+    assert client.post("/api/auth/login", json={"email": "operator1@test.local", "password": "wrong",
+                                                "account_type": "field_operator"}).status_code == 401
+    r = client.post("/api/auth/login", json={"email": "operator1@test.local", "password": PASSWORD, "account_type": "expert"})
+    assert r.status_code == 403 and "Field Operator sign-in" in r.json()["detail"]
+    # the administrator gives each user a password; a field operator needs a plant and an area of that plant
+    body = {"name": "New SIC", "email": "sic@test.local", "role": "field_operator", "title": "Shift In-Charge (SIC)",
+            "password": "sic-pass-1"}
+    assert client.post("/api/admin/users", json=body, headers=adm).status_code == 400
+    assert client.post("/api/admin/users", json={**body, "site_code": "GPS-BUU-04", "password": "short"},
+                       headers=adm).status_code == 400
+    assert client.post("/api/admin/users", json={**body, "site_code": "GPS-BUU-04", "area_code": "NOPE"},
+                       headers=adm).status_code == 400
+    r = client.post("/api/admin/users", json={**body, "site_code": "GPS-BUU-04", "area_code": "D2", "project_id": 1},
+                    headers=adm)
+    assert r.status_code == 200, r.text
+    new = r.json()["user"]
+    assert new["area_code"] == "D2" and new["project_id"] == 1 and new["has_password"] and "password_hash" not in new
+    assert client.post("/api/admin/users", json={**body, "site_code": "GPS-BUU-04"}, headers=adm).status_code == 409
+    h = _token(client, "SIC@test.local", "sic-pass-1", "field_operator")
+    me = client.get("/api/meta", headers=h).json()["user"]
+    assert me["area_code"] == "D2" and me["title"] == "Shift In-Charge (SIC)"
+    # a new password from the administrator signs the user out and replaces the old one
+    assert client.put(f"/api/admin/users/{new['id']}/password", json={"password": "x"}, headers=adm).status_code == 400
+    assert client.put(f"/api/admin/users/{new['id']}/password", json={"password": "sic-pass-2"}, headers=adm).status_code == 200
+    assert client.get("/api/meta", headers=h).status_code == 401
+    assert client.post("/api/auth/login", json={"email": "sic@test.local", "password": "sic-pass-1",
+                                                "account_type": "field_operator"}).status_code == 401
+    h = _token(client, "sic@test.local", "sic-pass-2", "field_operator")
+    assert client.post("/api/auth/logout", headers=h).status_code == 200
+    assert client.get("/api/meta", headers=h).status_code == 401
+    # the administrator's own password lives in .env and can't be set from the app
+    assert client.put(f"/api/admin/users/{admin['id']}/password", json={"password": "new-admin-pass"},
+                      headers=adm).status_code == 400
+    from app import config
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "changed-in-env")
+    seed.ensure_admin()
+    assert client.post("/api/auth/login", json={"email": "admin@test.local", "password": "admin-pass-123",
+                                                "account_type": "admin"}).status_code == 401
+    _token(client, "admin@test.local", "changed-in-env", "admin")
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "admin-pass-123")
+    seed.ensure_admin()
+    adm = admin_login(client)
+    # switching an account off signs it out; a user without history can be deleted
+    h = _token(client, "sic@test.local", "sic-pass-2", "field_operator")
+    assert client.put(f"/api/admin/users/{new['id']}", json={"active": False}, headers=adm).json()["active"] is False
+    assert client.get("/api/meta", headers=h).status_code == 401
+    assert client.post("/api/auth/login", json={"email": "sic@test.local", "password": "sic-pass-2",
+                                                "account_type": "field_operator"}).status_code == 403
+    assert client.delete(f"/api/admin/users/{new['id']}", headers=adm).status_code == 200
+
+
+@pytest.fixture
+def media_on(monkeypatch):
+    """Speech-to-text and vision stand-ins: a voice note 'says' its file name; a photo shows the option named in
+    its file name (or nothing)."""
+    from app import media
+    monkeypatch.setattr(media, "enabled", lambda: True)
+    calls = []
+
+    def transcribe(data, filename, context=""):
+        calls.append(("audio", filename))
+        return {"text": data.decode(), "language": "english", "english": data.decode()}
+
+    def look(images, context, question, what="photo"):
+        calls.append((what, question))
+        want = images[0].decode()
+        hit = next((o for o in (question or {}).get("options", []) if o == want), None)
+        return {"description": f"shows {want}", "answer": hit, "hint": None, "confidence": 0.9 if hit else 0.0,
+                "concern": None}
+    monkeypatch.setattr(media, "transcribe", transcribe)
+    monkeypatch.setattr(media, "look", look)
+    return calls
+
+
+def _first_check(client, h):
+    eq = next(e for e in client.get("/api/equipment", headers=h).json() if e["name"] == "D1 Agitator 1")
+    v = report(client, h, area_id=eq["area_id"], equipment_id=eq["id"], symptoms=["noise"])
+    opts = [r for r in last_replies(v) if r not in (HOW, CANT, NOT_SURE)]
+    return v, opts
+
+
+def test_media_voice_note_is_read_as_the_operators_words(client, media_on):
+    h = login(client, "operator1")
+    v, opts = _first_check(client, h)
+    asked = v["checks"]
+    r = client.post(f"/api/sessions/{v['session']['id']}/files", headers=h,
+                    files={"files": ("voice-note.webm", opts[0].encode(), "audio/webm")})
+    assert r.status_code == 200, r.text
+    v = r.json()
+    said = next(m for m in reversed(v["messages"]) if m["type"] == "user")
+    assert said["text"] == "" and said["heard"] == opts[0]
+    assert said["attachments"][0]["analysis"]["transcript"] == opts[0]
+    assert v["checks"] == asked + 1  # the spoken answer moved the troubleshooting on
+    # the expert's package and the LLM read the words too
+    from app import diagnosis
+    assert any(opts[0] in t["content"] for t in diagnosis.transcript(v["session"]["id"]) if t["role"] == "user")
+
+
+def test_media_photo_that_shows_an_answer_answers_the_check(client, media_on):
+    h = login(client, "operator1")
+    v, opts = _first_check(client, h)
+    asked = v["checks"]
+    v = client.post(f"/api/sessions/{v['session']['id']}/files", headers=h,
+                    files={"files": ("sight-glass.jpg", opts[-1].encode(), "image/jpeg")}).json()
+    said = next(m for m in reversed(v["messages"]) if m["type"] == "user")
+    assert said["heard"] == opts[-1] and said["attachments"][0]["analysis"]["answer"] == opts[-1]
+    assert v["checks"] == asked + 1
+    assert media_on[-1][1]["options"] == opts  # the vision model was given the pending check's options
+    # a photo that shows none of them is added as information, not as an answer
+    sid = v["session"]["id"]
+    n = v["checks"]
+    v = client.post(f"/api/sessions/{sid}/files", headers=h, files={"files": ("yard.jpg", b"a puddle", "image/jpeg")}).json()
+    said = next(m for m in reversed(v["messages"]) if m["type"] == "user")
+    assert "[Photo: shows a puddle]" in said["heard"] and v["checks"] == n
+
+
+def test_media_evidence_for_a_condition_check_suggests_its_answer(client, media_on, monkeypatch):
+    monkeypatch.setattr(config, "SURVEY_SIZE", 4)
+    h = login(client, "operator1")
+    eq = next(e for e in client.get("/api/equipment", headers=h).json() if e["name"] == "D1 Agitator 2")
+    v = report(client, h, area_id=eq["area_id"], equipment_id=eq["id"], symptoms=["noise"])
+    q = next(m for m in v["messages"] if m["type"] == "survey")["questions"][0]
+    n = len(v["messages"])
+    v = client.post(f"/api/sessions/{v['session']['id']}/files", headers=h,
+                    data={"caption": f"Check 1: {q['text']}", "check_id": q["id"]},
+                    files={"files": ("gauge.jpg", q["options"][1].encode(), "image/jpeg")}).json()
+    assert len(v["messages"]) == n + 1  # filed as evidence: no reply, the checks carry on
+    ev = v["messages"][-1]
+    assert ev["evidence"] and ev["check_id"] == q["id"] and ev["attachments"][0]["analysis"]["answer"] == q["options"][1]
+    assert v["survey"]
+    # a voice note on a check answers it in words
+    v = client.post(f"/api/sessions/{v['session']['id']}/files", headers=h,
+                    data={"caption": f"Check 1: {q['text']}", "check_id": q["id"]},
+                    files={"files": ("voice-note.webm", q["options"][0].encode(), "audio/webm")}).json()
+    assert v["messages"][-1]["attachments"][0]["analysis"]["answer"] == q["options"][0]
+
+
+def test_media_is_not_read_once_escalated_and_transcribes_report_voice(client, media_on):
+    h = login(client, "operator1")
+    v, _ = _first_check(client, h)
+    sid = v["session"]["id"]
+    client.post(f"/api/sessions/{sid}/escalate", headers=h, data={"description": "please look"})
+    before = len(media_on)
+    v = client.post(f"/api/sessions/{sid}/files", headers=h, files={"files": ("v.webm", b"hello", "audio/webm")}).json()
+    assert len(media_on) == before and "analysis" not in v["messages"][-1]["attachments"][0]
+    assert v["media"] is False
+    r = client.post("/api/sessions/transcribe", headers=h, files={"file": ("note.webm", b"grinding noise at D2", "audio/webm")})
+    assert r.status_code == 200 and r.json()["english"] == "grinding noise at D2"
+
+
+def test_sitebrain_writes_at_most_three_sentences(client):
+    from app import diagnosis
+    from app.diagnosis import crisp, sentences
+    assert sentences("Pressure is 2.5 bar, e.g. at the inlet. Check No. 3 valve. Is it open?") == [
+        "Pressure is 2.5 bar, e.g. at the inlet.", "Check No. 3 valve.", "Is it open?"]
+    assert crisp("A. B. C. D. Can you check it?") == "A. B. Can you check it?"  # the question survives
+    ask = "With the pump isolated under LOTO, look at the coupling: is it worn?"
+    assert crisp(f"Good. That rules out the seal. The bearing is likely. {ask}", keep=ask) == f"Good. That rules out the seal. {ask}"
+    # every SiteBrain message of a whole troubleshooting session; an expert's own words are never trimmed
+    h = login(client, "operator1")
+    eq = next(e for e in client.get("/api/equipment", headers=h).json() if e["name"] == "D4 Agitator 1")
+    v = report(client, h, area_id=eq["area_id"], equipment_id=eq["id"], symptoms=["noise", "vibration"])
+    for _ in range(8):
+        r = last_replies(v)
+        if not r or v["session"]["status"] != "active":
+            break
+        v = say(client, v["session"]["id"], r[0], h)
+    long = [m["text"] for m in v["messages"] if m["type"] in ("agent", "analysis", "offer", "survey")
+            and not m.get("expert") and len(sentences(m["text"])) > 3]
+    assert not long, long
+    diagnosis.add_msg(v["session"]["id"], "agent", who="Expert 1 · Technical Expert", expert=True, text="One. Two. Three. Four.")
+    assert diagnosis.messages(v["session"]["id"])[-1]["text"] == "One. Two. Three. Four."
+
+
+def test_options_can_be_picked_by_voice(client, media_on):
+    from app.diagnosis import STEP_CANT, match_spoken
+    temps = ["Below 70°C", "70–85°C", "Above 85°C", HOW, CANT]
+    assert match_spoken(temps, "it's about 90 degrees") == ["Above 85°C"]
+    assert match_spoken(temps, "it's above 85 degrees", multi=True) == ["Above 85°C"]  # not 70–85 as well
+    assert match_spoken(temps, "the first one") == ["Below 70°C"]
+    assert match_spoken(temps, "option 2") == ["70–85°C"]
+    assert match_spoken(temps, "I can't check it, it's too hot to reach") == [CANT]
+    oil = ["Clean amber, level OK", "Dark with metal fines", "Milky / water ingress", "Low level or oil leaking"]
+    assert match_spoken(oil, "dark with metal fines and the level is low", multi=True) == [
+        "Dark with metal fines", "Low level or oil leaking"]
+    assert match_spoken([DONE, STEP_HOW, STEP_CANT], "okay that's done") == [DONE]
+    assert match_spoken(oil, "the weather is nice") == []  # the LLM is off in tests: no guess
+    # through the API: the recording is transcribed and matched to the options on screen
+    import json as _json
+    r = client.post("/api/sessions/transcribe", headers=login(client, "operator1"),
+                    data={"options": _json.dumps(temps)}, files={"file": ("say.webm", b"above 85 I think", "audio/webm")})
+    assert r.status_code == 200 and r.json()["matches"] == ["Above 85°C"]
 
 
 def test_audit_log_is_append_only():
@@ -656,7 +899,7 @@ def test_llm_offering_actions_as_answers_falls_back_to_a_field_check(client, mon
     h = login(client, "operator1")
     v = report(client, h, equipment_id="GPS-BUU-04|BUU|Chiller Pump 1", symptoms=["noise"])
     ask = next(m for m in reversed(v["messages"]) if m.get("replies"))
-    assert ask["text"].startswith("No flush flow points to seal starvation. Next:")
+    assert ask["text"].startswith("No flush flow points to seal starvation.") and ask["text"].endswith(ask["prompt"])
     assert not any(r.startswith(("Inspect", "Measure")) for r in ask["replies"]) and CANT in ask["replies"]
     assert ask["prompt"] and ask["multi"]  # a decision-tree check with its results as answers
 
@@ -891,3 +1134,25 @@ def test_condition_survey_can_be_declined(client, survey_on):
     v = client.post(f"/api/sessions/{sid}/survey", headers=h, json={}).json()
     assert v["survey"] is None and v["checks"] == 0 and last_replies(v), "back to one check at a time"
     assert v["messages"][-2]["text"] == "Ask me one check at a time"
+
+
+# runs last: the migration replaces the users
+def test_v2_database_migrates_keeping_its_issues(client):
+    """A v2 database (username sign-in, CDT & PST as one area) is migrated in place, not rebuilt."""
+    from app import db, seed
+    db.ex("ALTER TABLE users ADD COLUMN username TEXT")
+    db.ex("UPDATE counters SET value=2 WHERE name='schema_version'")
+    cdt = db.q1("SELECT id FROM areas WHERE site_code='GPS-BUU-04' AND code='CDT'")["id"]
+    pst = db.q1("SELECT id FROM areas WHERE site_code='GPS-BUU-04' AND code='PST'")["id"]
+    for table in ("equipment", "sessions", "escalations", "interlocks"):
+        db.ex(f"UPDATE {table} SET area_id=? WHERE area_id=?", (cdt, pst))
+    db.ex("DELETE FROM areas WHERE site_code='GPS-BUU-04' AND code='PST'")
+    n = db.q1("SELECT COUNT(*) n FROM sessions")["n"]
+    seed.seed()
+    assert db.schema_version() == 5 and db.q1("SELECT COUNT(*) n FROM sessions")["n"] == n
+    assert [u["role"] for u in db.q("SELECT role FROM users")] == ["admin"]
+    pst = db.q1("SELECT id FROM areas WHERE site_code='GPS-BUU-04' AND code='PST'")["id"]
+    assert {e["name"] for e in db.q("SELECT name FROM equipment WHERE area_id=?", (pst,))} == {
+        "PST Pump 1", "PST Pump 2", "PST Agitator"}
+    codes = [a["code"] for a in db.q("SELECT code FROM areas WHERE site_code='GPS-BUU-04' ORDER BY sort_order")]
+    assert codes[:10] == ["FEED", "PST", "D1", "D2", "D3", "D4", "HWG", "CDT", "SLS", "BUU"]

@@ -1,7 +1,7 @@
 """Sites, equipment status, topology and telemetry."""
 from fastapi import APIRouter, Depends
 
-from .. import config, db, diagnosis, knowledge, llm, telemetry, topology
+from .. import config, db, diagnosis, knowledge, llm, media, telemetry, topology
 from ..auth import check_site, current_user, public_user, site_scope
 from ..catalog import KIND_ICON, KINDS, SEVERITIES, SYMPTOMS, report_hint
 from ..seed import current_shift
@@ -16,7 +16,7 @@ def meta(user: dict = Depends(current_user)):
         sites = [s for s in sites if s["code"] == user["site_code"]]
     sh, start = current_shift()
     return {
-        "user": public_user(user), "sites": sites, "llm": llm.status(),
+        "user": public_user(user), "sites": sites, "llm": llm.status(), "media": media.enabled(),
         "current_shift": {"shift": sh, "date": start.strftime("%d %b %Y")},
         "policy": {"max_turns": config.MAX_DIAGNOSTIC_TURNS, "confidence": config.CONFIDENCE_THRESHOLD},
         "kinds": KINDS, "kind_icons": KIND_ICON, "symptoms": SYMPTOMS, "severities": SEVERITIES,

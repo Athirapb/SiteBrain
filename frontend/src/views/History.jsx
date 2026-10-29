@@ -3,7 +3,7 @@ import { api } from "../api";
 import { Empty, Icon, Modal, PillTabs, Spinner, URGENCY_BG, fmtDate, fmtDuration, fmtTime, useAsync } from "../components/ui";
 
 // status filter → which cases it keeps, and how a case's outcome reads
-const STATUS_TABS = [["All", "All"], ["open", "Open"], ["SiteBrain", "Resolved By SiteBrain"], ["Expert", "Resolved By Expert"], ["closed", "Closed"]];
+const STATUS_TABS = [["All", "All"], ["open", "Open"], ["SiteBrain", "Solved In The App"], ["Expert", "Solved By An Expert"], ["closed", "Closed"]];
 const KEEP = {
   All: () => true,
   open: (h) => h.status === "active" || h.status === "escalated",
@@ -16,10 +16,10 @@ const outcome = (h) =>
     : h.status === "escalated" ? ["With expert", "var(--gps-info)", "account-hard-hat-outline"]
     : h.status === "closed" ? ["Closed", "var(--t50)", "archive-check-outline"]
     : h.resolved_by === "Expert" ? ["Resolved by expert", "var(--gps-info)", "check-decagram-outline"]
-    : ["Resolved by SiteBrain", "var(--gps-green-mid)", "check-decagram-outline"];
+    : ["Solved in the app", "var(--gps-green-mid)", "check-decagram-outline"];
 const NO_EQ = "__area__"; // equipment filter value for issues whose equipment was never identified
 
-export default function History({ user, nav }) {
+export default function History({ user, nav, embedded }) {
   const data = useAsync(() => api.get("/api/sessions?limit=1000"), []);
   const [project, setProject] = useState("All");
   const [eq, setEq] = useState("All");
@@ -73,7 +73,7 @@ export default function History({ user, nav }) {
   const clear = () => { setProject("All"); setEq("All"); setStatus("All"); setQuery(""); };
 
   return (
-    <div className="page" style={{ gap: 16 }}>
+    <div className={embedded ? "" : "page"} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="card hist-filters">
         <div className="search grow" style={{ minWidth: 220 }}>
           <Icon name="magnify" />
@@ -152,7 +152,7 @@ export default function History({ user, nav }) {
         </div>
       )}
       {open && <SessionModal sid={open} onClose={() => setOpen(null)} canOpen={user.permissions.includes("copilot")}
-                             onOpen={() => nav("copilot", { sessionId: open })} />}
+                             onOpen={() => nav("issue", { sessionId: open, from: "kb" })} />}
     </div>
   );
 }
@@ -174,7 +174,7 @@ function SessionModal({ sid, onClose, onOpen, canOpen }) {
                 {" · "}reported {fmtTime(s.created_at)}{s.report?.reported_by ? ` by ${s.report.reported_by}` : ""}
               </div>
             </div>
-            {canOpen && <button className="btn sm" onClick={onOpen}>Open In Copilot</button>}
+            {canOpen && <button className="btn sm" onClick={onOpen}>Open The Chat</button>}
           </div>
           {s.root_cause && (
             <div className="panel solution">

@@ -21,11 +21,12 @@ NODES = {
     "FLR": ("Flare / Recycle Loop", "gas"),
     "CW": ("Cooling & Chilled Water", "utility"),
     "SLS": ("Solid-Liquid Separation", "slurry"),
-    "CDT": ("CDT & PST", "slurry"),
+    "PST": ("Primary Sludge Tank", "slurry"),
+    "CDT": ("Concentrated Digestate Tank", "slurry"),
 }
 
 EDGES = [
-    ("FEED", "DIG", "slurry"), ("HWG", "DIG", "heat"), ("DIG", "SCR", "raw biogas"),
+    ("FEED", "PST", "slurry"), ("PST", "DIG", "primary sludge"), ("HWG", "DIG", "heat"), ("DIG", "SCR", "raw biogas"),
     ("SCR", "FLT", "sweet gas"), ("FLT", "BLW", "filtered gas"), ("BLW", "LPC", "gas"),
     ("LPC", "CHL", "compressed gas"), ("CW", "CHL", "chilled water"), ("CHL", "MEM", "dry gas"),
     ("MEM", "HPC", "CBG >95% CH4"), ("MEM", "FLR", "off-spec / tail gas"), ("HPC", "CBG", "CBG"),
@@ -38,7 +39,7 @@ _RULES = [
     (r"Cooling Water Pump|Chiller Pump", "CW"), (r"Flare Blower", "FLR"),
 ]
 _UNIT_NODE = {"D1": "DIG", "D2": "DIG", "D3": "DIG", "D4": "DIG", "FEED": "FEED", "SLS": "SLS",
-              "CDT": "CDT", "HWG": "HWG", "BUU": "LPC"}
+              "PST": "PST", "CDT": "CDT", "HWG": "HWG", "BUU": "LPC"}
 
 
 def node_of(eq: dict) -> str | None:

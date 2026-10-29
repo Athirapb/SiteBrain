@@ -15,11 +15,12 @@ The field operator is talked to like a colleague: every check says why it is ask
 skipped ("I can't check this"), and every answer is acknowledged with what it tells us.
 """
 import itertools
+import json
 import math
 import re
 import zlib
 
-from . import config, db, escalation, knowledge, llm, safety, telemetry, topology
+from . import config, db, escalation, knowledge, llm, media, safety, telemetry, topology
 from .brain import CATEGORY_LABEL, MAINTENANCE, conditions_for, find_cause, roots, tree_for
 from .catalog import SEVERITIES, SYMPTOM_BY_ID, report_hint, report_summary, symptom_labels, symptoms_for
 
@@ -98,7 +99,45 @@ def messages(sid: str) -> list[dict]:
     return [{"id": r["id"], "type": r["type"], "created_at": r["created_at"], **db.loads(r["payload"], {})} for r in rows]
 
 
+# SiteBrain writes like a colleague on WhatsApp: at most three short sentences per message
+MAX_SENTENCES = 3
+_ABBREV = re.compile(r"\b(e\.g|i\.e|etc|approx|vs|no|nos|min|max|fig|ref|dr|mr|ms|st)\.$", re.I)
+_CRISP_TYPES = {"agent", "analysis", "offer", "survey"}
+
+
+def sentences(text: str) -> list[str]:
+    """Split into sentences, keeping decimals (2.5 bar), abbreviations (e.g.) and list numbers together."""
+    out: list[str] = []
+    for part in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"“‘(])", (text or "").strip()):
+        if out and (_ABBREV.search(out[-1]) or re.search(r"(^|\s)\d+\.$", out[-1])):
+            out[-1] = f"{out[-1]} {part}"
+        elif part:
+            out.append(part)
+    return out
+
+
+def crisp(text: str, keep: str | None = None, n: int = MAX_SENTENCES) -> str:
+    """Trim a message to n sentences. `keep` (the question or step being asked, at the end) is never cut: only the
+    lead-in before it is shortened. Without it, a closing question survives the cut too."""
+    text = (text or "").strip()
+    if not text:
+        return text
+    if keep and text.endswith(keep.strip()) and keep.strip() != text:
+        tail = keep.strip()
+        head = sentences(text[: -len(tail)])
+        room = max(1, n - len(sentences(tail)))
+        return " ".join(head[:room] + [tail]) if head else tail
+    parts = sentences(text)
+    if len(parts) <= n:
+        return text
+    if parts[-1].endswith("?") and not any(p.endswith("?") for p in parts[: n - 1]):
+        return " ".join(parts[: n - 1] + [parts[-1]])
+    return " ".join(parts[:n])
+
+
 def add_msg(sid: str, type_: str, **payload) -> None:
+    if type_ in _CRISP_TYPES and payload.get("text") and not (payload.get("expert") and type_ == "agent"):
+        payload["text"] = crisp(payload["text"], payload.get("prompt"))  # a person's own words are never trimmed
     db.insert("messages", {"session_id": sid, "type": type_, "payload": payload, "created_at": db.now_iso()})
 
 
@@ -206,6 +245,18 @@ def pick_survey(tree: dict, post: dict, asked: list[str], hint: str, k: int) -> 
     return chosen
 
 
+def by_likely_cause(qs: list[dict], post: dict) -> list[dict]:
+    """Order checks so the one that tests the most likely cause comes first: a check tests a cause when the cause
+    changes which answer the operator would see."""
+    def score(q: dict) -> float:
+        best = 0.0
+        for c, p in post.items():
+            liks = [_answer_lik(q, i, c) for i in range(len(q["options"]))]
+            best = max(best, p * (max(liks) - min(liks)))
+        return best
+    return sorted(qs, key=score, reverse=True)
+
+
 def _num(text: str) -> float | None:
     m = re.search(r"-?\d+(?:\.\d+)?", text)
     return float(m.group()) if m else None
@@ -246,6 +297,77 @@ def match_option(q: dict, text: str) -> int | None:
     if _OK_WORDS.search(t) and not re.search(r"\b(not|no flow|abnormal|high|low|leak)\b", t):
         return 0
     return None
+
+
+# Helper replies by what people say for them
+_SPOKEN_HELPERS = [
+    (re.compile(r"\b(can'?t|cannot|can not|unable|not able|no way to)\b.*\b(check|do|see|reach|get)\b|\bskip\b", re.I),
+     [CANT, STEP_CANT, SKIP_WHY]),
+    (re.compile(r"\bhow (do|can|should) i\b|\bhow to\b|\bshow me how\b", re.I), [HOW, STEP_HOW]),
+    (re.compile(r"\b(not sure|don'?t know|no idea|unsure|maybe)\b", re.I), [NOT_SURE, CANT]),
+    (re.compile(r"\b(all (the )?steps|every step)\b", re.I), [ALL_STEPS]),
+    (re.compile(r"\b(done|finished|completed|did it|that'?s done)\b", re.I), [DONE]),
+    (re.compile(r"\b(still|not working|didn'?t work|same problem|no change)\b", re.I), [NOT_WORKING]),
+    (re.compile(r"\b(working (fine|normally|now)|it works|fixed|yes,? it'?s working|running fine)\b", re.I), [WORKING]),
+]
+_ORDINALS = {"first": 0, "one": 0, "1": 0, "second": 1, "two": 1, "2": 1, "third": 2, "three": 2, "3": 2,
+             "fourth": 3, "four": 3, "4": 3, "fifth": 4, "five": 4, "5": 4, "last": -1}
+
+
+def match_spoken(options: list[str], text: str, multi: bool = False) -> list[str]:
+    """Which of the options on screen a spoken answer picks ('first one', '75 degrees', 'dark with fines', 'I can't
+    check this'). Several when the check takes more than one answer. Falls back to the LLM, else nothing."""
+    text = (text or "").strip()
+    if not text or not options:
+        return []
+    helpers = [o for o in options if o in _NOT_OBSERVATIONS]
+    answers = [o for o in options if o not in _NOT_OBSERVATIONS]
+    m = re.search(r"\b(?:option|number|answer|the)\s+(first|second|third|fourth|fifth|last|one|two|three|four|five|[1-5])\b",
+                  text, re.I) or re.fullmatch(r"\W*(first|second|third|fourth|fifth|last|one|two|three|four|five|[1-5])\W*(one)?\W*",
+                                              text, re.I)
+    if m and answers:
+        i = _ORDINALS[m.group(1).lower()]
+        if -len(answers) <= i < len(answers):
+            return [answers[i]]
+    for pattern, wanted in _SPOKEN_HELPERS:
+        hit = next((o for o in wanted if o in options), None)
+        if hit and pattern.search(text):
+            return [hit]
+    if _num(text) is not None and any(re.search(r"\d", o) for o in answers):
+        # a reading ("above 85", "about 90 degrees") picks the one range it falls in, not every label with an 85;
+        # "above 85" is past the 70–85 range's edge, "below 70" short of it
+        n = _num(text)
+        if re.search(r"\b(above|over|more than|higher than|greater than|beyond)\b|>", text, re.I):
+            n += 0.01
+        elif re.search(r"\b(below|under|less than|lower than)\b|<", text, re.I):
+            n -= 0.01
+        i = match_option({"options": [{"label": o} for o in answers]}, f"{n:g}")
+        if i is not None:
+            return [answers[i]]
+    said = set(knowledge.tokenize(text))
+    scored = []
+    for o in answers:
+        lt = set(knowledge.tokenize(o))
+        if lt:
+            scored.append((len(lt & said) / len(lt), o))
+    strong = [o for sc, o in sorted(scored, reverse=True) if sc >= 0.5]
+    if strong:
+        return strong if multi else strong[:1]
+    if answers:
+        i = match_option({"options": [{"label": o} for o in answers]}, text)
+        if i is not None:
+            return [answers[i]]
+    if llm.available():
+        res = llm.complete_json(
+            "A field operator answered a question by voice. Pick the option(s) they meant, exactly as written; "
+            "none if what they said matches no option. JSON {\"picked\": [str]}.",
+            [{"role": "user", "content": f"Options: {json.dumps(options)}\n{'Several may apply.' if multi else 'Pick one.'}"
+                                         f"\nThey said: {text}"}],
+            {"type": "object", "additionalProperties": False, "required": ["picked"],
+             "properties": {"picked": {"type": "array", "items": {"type": "string"}}}}, max_tokens=200)
+        picked = [o for o in options if o in ((res or {}).get("picked") or [])]
+        return picked if multi else picked[:1]
+    return []
 
 
 def causes_view(tree: dict, post: dict, excluded: list[str]) -> list[dict]:
@@ -455,17 +577,11 @@ def _begin_diagnosis(s: dict, area: dict, eq: dict) -> None:
     s["causes"] = causes_view(tree, st["posterior"], [])
     s["confidence"] = s["causes"][0]["likelihood"] if s["causes"] else 0.0
     top = matched[0] if matched else None
-    rep = s["report"]
-    who = rep.get("reported_by") or "there"
-    what = ", ".join(rep.get("symptom_labels") or []).lower() or "the problem you described"
     add_msg(s["id"], "analysis",
-            text=f"Thanks, {who}. I've got your report on {eq['name']} ({area['name']}) — {what}, severity "
-                 f"{(rep.get('severity') or 'Medium').lower()}. Let's find the cause together. Below are the possible "
-                 f"causes laid out as a fishbone; I'll ask you a few quick checks to narrow them down, then we'll dig "
-                 f"into why it happened.",
+            text="Thanks for reporting. Let's solve it together. Below are the possible causes — a few quick checks "
+                 "will narrow them down.",
             safety_rules=[r["action"] for r in _rules_for(s, area, eq) if r["category"] == "advisory"],
-            footnote=(f"A similar problem is on record: {top['id']} — {top['title']} ({top['sim']}% match)."
-                      if top and top["sim"] > 40 else "No close match in past cases yet, so we'll work it out from the checks."))
+            similar=({"id": top["id"], "title": top["title"], "sim": top["sim"]} if top and top["sim"] > 40 else None))
     add_msg(s["id"], "fishbone", problem=_problem(s, eq), bones=fishbone(tree, st["posterior"], []))
     _apply_safety(s, area, eq)
     if s["mode"] == "bot" and not _ask_survey(s, area, eq):
@@ -497,14 +613,12 @@ def _ask_survey(s: dict, area: dict, eq: dict) -> bool:
         return False
     st = s["state"]
     qs = pick_survey(tree_for(eq["kind"]), st["posterior"], st["asked"], report_hint(s["report"]), config.SURVEY_SIZE)
+    qs = by_likely_cause(qs, st["posterior"])  # asked one at a time, most likely cause first
     if len(qs) < 2:
         return False
     st["survey"], st["pending"] = [q["id"] for q in qs], None
-    who = s["report"].get("reported_by")
     add_msg(s["id"], "survey", who="SiteBrain",
-            text=f"First, {who + ', ' if who else ''}let's get a picture of how {eq['name']} is right now. These "
-                 f"{len(qs)} checks together tell the causes on the fishbone apart. Do the ones you can, pick what you "
-                 "see (several if more than one applies), and submit them together.",
+            text=f"These {len(qs)} checks together tell the detailed causes. Do the ones you can — one at a time.",
             questions=[{"id": q["id"], "text": q["text"], "purpose": q.get("purpose"), "how": q.get("how"),
                         "options": [o["label"] for o in q["options"]]} for q in qs])
     return True
@@ -709,11 +823,13 @@ def _localize_turn(s: dict, text: str) -> str | None:
 # Conversation turns
 # ---------------------------------------------------------------------------
 
-def send(sid: str, text: str, user: dict, choices: list[str] | None = None, files: list[dict] | None = None) -> dict:
+def send(sid: str, text: str, user: dict, choices: list[str] | None = None, files: list[dict] | None = None,
+         display: str | None = None) -> dict:
     """One field operator message. They can write at any time: answers move the troubleshooting on, anything else
     (a question, extra information) gets a direct reply and the pending question or step is repeated.
     `choices` carries the options picked together on a multi-select check; `text` is their readable form.
-    `files` are attachments already saved with save_files(), shown on the message."""
+    `files` are attachments already saved with save_files(), shown on the message. `display` is what the chat
+    shows when it differs from what the engine reads (a voice note: nothing typed, the engine reads its words)."""
     text = (text or "").strip()
     choices = [c.strip() for c in choices or [] if c and c.strip()]
     s = load_session(sid)
@@ -727,8 +843,9 @@ def send(sid: str, text: str, user: dict, choices: list[str] | None = None, file
         mark_resolved(sid, user)
         return load_session(sid)
 
-    add_msg(sid, "user", text=text, author=user["name"], **({"choices": choices} if len(choices) > 1 else {}),
-            **({"attachments": files} if files else {}))
+    add_msg(sid, "user", text=text if display is None else display, author=user["name"],
+            **({"choices": choices} if len(choices) > 1 else {}), **({"attachments": files} if files else {}),
+            **({"heard": text} if display is not None and display != text else {}))
     st = s["state"]
     phase = st.get("phase")
 
@@ -818,7 +935,7 @@ def _side_system(s: dict, area: dict, eq: dict | None, prompt: dict | None) -> s
     lines = [
         "You are SiteBrain, the friendly operations copilot of a compressed-biogas plant, in the middle of troubleshooting "
         "with a field operator. They just asked a side question or shared extra information.",
-        "Reply like an experienced colleague: plain language, practical, safe, max 60 words, no emoji. Answer the "
+        "Reply like a colleague on WhatsApp: plain words, practical, safe, at most 2 short sentences, no emoji. Answer the "
         "question directly from the knowledge below; if you don't know, say so and suggest the shift engineer. If they "
         "shared information, thank them and say in one sentence how it changes the picture (or that it doesn't). Do NOT "
         "ask a new check and do NOT repeat the pending question — SiteBrain repeats it after your reply.",
@@ -985,10 +1102,19 @@ def _start_fix(s: dict, who: str, expert: bool, steps: list[str], prevent: list[
     if not steps:
         _finish_fix(s, who, expert)
         return
+    area, eq = load_area(s["area_id"]), session_eq(s)
+    rules = _rules_for(s, area, eq)
+    st["fix"]["safety"] = rules[0]["action"] if rules else None
     add_msg(s["id"], "agent", who=who, expert=expert,
             text=f"Let's fix it — {len(steps)} short step{'s' if len(steps) > 1 else ''}, one at a time. Tap Done as you "
-                 "finish each one, and ask me anything along the way.")
+                 "finish each one, and ask me anything along the way.",
+            safety=st["fix"]["safety"] or "Follow your site safety rules and use the right protective equipment.")
     _ask_step(s, who, expert)
+
+
+# Fix steps that open up, isolate or restart equipment get the safety note again
+_HAZARD_STEP = re.compile(r"\b(isolat|lock|loto|purg|vent|depressur|open|dismantl|remov|replac|restart|start|energi|"
+                          r"clean|drain|weld|hot work|enter)", re.I)
 
 
 def _ask_step(s: dict, who: str, expert: bool, lead: str = "") -> None:
@@ -996,6 +1122,7 @@ def _ask_step(s: dict, who: str, expert: bool, lead: str = "") -> None:
     step = f["steps"][f["idx"]]
     add_msg(s["id"], "agent", who=who, expert=expert, text=f"{lead} {step}".strip(), prompt=step,
             fix_step=f["idx"] + 1, fix_total=len(f["steps"]),
+            safety=f.get("safety") if f.get("safety") and _HAZARD_STEP.search(step) else None,
             replies=[DONE, STEP_HOW, STEP_CANT] + ([ALL_STEPS] if len(f["steps"]) > 2 else []))
 
 
@@ -1152,10 +1279,9 @@ def _confirm_cause(s: dict, area: dict, eq: dict, tree: dict, who: str, expert: 
     st = s["state"]
     cause = find_cause(tree, s["causes"][0]["id"])
     st["pending"] = None
-    rules = _rules_for(s, area, eq)
     add_msg(s["id"], "finding", who=who, expert=expert, direct_cause=cause["label"],
             category=cause.get("category", "Machine"), category_label=CATEGORY_LABEL.get(cause.get("category"), "Machine"),
-            confidence=s["confidence"], steps=cause["steps"], safety=next((r["action"] for r in rules), None),
+            confidence=s["confidence"], steps=cause["steps"],
             text=f"{lead} I'm fairly confident ({round(s['confidence'] * 100)}%) it's {cause['label'].lower()}.".strip())
     st["rca"] = {"cause": cause["id"], "direct_cause": cause["label"], "category": cause.get("category", "Machine"),
                  "chain": [], "node": []}
@@ -1185,8 +1311,7 @@ def _ask_why(s: dict, cause: dict, who: str, expert: bool, intro: bool = False, 
         text = f"{lead} {node['text']}".strip()
     add_msg(s["id"], "agent", who=who, expert=expert, text=text, prompt=node["text"], how=node.get("how"),
             why_step=len(rca["chain"]) + 1,
-            purpose="5-Why: each answer takes us one level deeper, from what broke to why our system let it happen."
-            if intro else None,
+            purpose="Knowing why it happened stops it from coming back." if intro else None,
             replies=[b["label"] for b in node["branches"]] + [NOT_SURE, SKIP_WHY])
 
 
@@ -1236,7 +1361,7 @@ def _why_turn(s: dict, text: str) -> None:
         _finalize_rca(s, area, eq, cause, br["then"], who, expert)
     else:
         _ask_why(s, cause, who, expert, lead=_vary(s, ["I see.", "Okay.", "Understood.", "Right, that makes sense."], "why")
-                 + " Let's go one level deeper.")
+                 + " One more question.")
 
 
 def _llm_why_fallback(s: dict, area: dict, eq: dict) -> None:
@@ -1251,7 +1376,7 @@ def _llm_why_fallback(s: dict, area: dict, eq: dict) -> None:
         return
     rca.update(cause=best["id"], node=[], chain=[])
     s["state"]["phase"] = "why"
-    _ask_why(s, best, "SiteBrain", False, lead="Let's keep going with the why-why from my own notes on "
+    _ask_why(s, best, "SiteBrain", False, lead="Let's keep going from my own notes on "
                                                 f"{best['label'].lower()}.")
 
 
@@ -1272,8 +1397,8 @@ def _finalize_rca(s: dict, area: dict, eq: dict, cause: dict, root: dict | None,
     add_msg(s["id"], "solution", who=who, expert=expert, root_cause=root_label, direct_cause=rca["direct_cause"],
             category=category, category_label=CATEGORY_LABEL.get(category, category), why_chain=rca["chain"],
             steps=steps, preventive=prevent, safety=next((r["action"] for r in rules), None),
-            basis=("case " + ", ".join(cases) + " · " if cases else "") + "fishbone field checks"
-                  + (" + 5-Why" if rca["chain"] else ""),
+            basis=("past case " + ", ".join(cases) + " and " if cases else "") + "your field checks"
+                  + (" and answers" if rca["chain"] else ""),
             text="Found the root cause." if complete else "Here's what we know.")
     rca.update(root=root_label, category=category, prevent=prevent)
     s["identified"] = 1
@@ -1375,8 +1500,9 @@ def transcript(sid: str) -> list[dict]:
                                                    f"(severity {m.get('severity')})"})
         elif m["type"] == "user" or (m["type"] == "escalation" and m.get("text")):
             files = ", ".join(f["filename"] for f in m.get("attachments") or [])
-            out.append({"role": "user", "content": " ".join(x for x in [m["text"], f"[attached: {files}]" if files else ""]
-                                                            if x)})
+            read = " ".join(media.as_text(f.get("analysis")) for f in m.get("attachments") or [] if f.get("analysis"))
+            out.append({"role": "user", "content": " ".join(x for x in [m["text"], f"[attached: {files}]" if files else "",
+                                                                        read] if x)})
         elif m["type"] == "agent":
             out.append({"role": "assistant", "content": (f"{m.get('who')}: " if m.get("expert") else "") + m["text"]})
         elif m["type"] == "finding":
@@ -1404,10 +1530,10 @@ def _bot_system(s: dict, area: dict, eq: dict) -> str:
         "through it with them using standard root cause analysis: a FISHBONE (6M: Man, Machine, Method, Material, "
         "Measurement, Environment) to find the direct cause, then 5-WHY to find the systemic root cause.",
         "",
-        "HOW TO TALK: like an experienced, friendly colleague on the radio. Warm, plain language, short sentences, "
-        "second person. Acknowledge what they told you and say briefly what it means (what it rules out or points to). "
-        "When you ask a check, say in a few words why it matters and keep it safe (LOTO, gas test) when relevant. "
-        "Explain jargon. No emoji, no grovelling apologies. Max 70 words per reply. The field operator is "
+        "HOW TO TALK: like a colleague messaging on WhatsApp. Crisp, warm, plain words, second person. A whole message "
+        "is at most 3 short sentences: `reply` is ONE short sentence saying what their answer means (what it rules out "
+        "or points to), and `instruction` is one or two short sentences. Keep it safe (LOTO, gas test) in few words "
+        "when relevant. No jargon, no emoji, no apologies, no repeating what they said. The field operator is "
         f"{s['report'].get('reported_by') or 'the field operator'}; use their name now and then, never 'Tech'.",
         "", knowledge_context(s, area, eq), "",
         "METHOD",
@@ -1520,7 +1646,7 @@ def _llm_bot_turn(s: dict, area: dict, eq: dict, text: str | None) -> bool:
                 direct_cause=(st.get("rca") or {}).get("direct_cause") or data.get("direct_cause"),
                 category=cat, category_label=CATEGORY_LABEL.get(cat, cat), why_chain=chain,
                 steps=data.get("steps") or [], preventive=data.get("preventive_actions") or [],
-                basis=("case " + ", ".join(cases) + " · " if cases else "") + "fishbone field checks + 5-Why",
+                basis=("past case " + ", ".join(cases) + " and " if cases else "") + "your field checks and answers",
                 safety=next((r["action"] for r in rules), None), text="Found the root cause.")
         st["rca"] = {**(st.get("rca") or {}), "chain": chain, "root": data["root_cause"], "category": cat,
                      "prevent": data.get("preventive_actions") or []}
@@ -1583,9 +1709,8 @@ def suggest_escalation(s: dict, reason: str) -> None:
         return
     st.setdefault("suggested", []).append(reason)
     add_msg(s["id"], "offer", reason=reason,
-            text=f"I'd recommend bringing in a technical expert: {reason[0].lower() + reason[1:]}. Tap Escalate To "
-                 "Technical Expert to describe the problem and attach photos or videos for them. Until then I'll keep "
-                 "helping — you can also describe what you see in your own words.")
+            text="I'd recommend bringing in a technical expert. Or I'll keep helping — you can continue the chat and we "
+                 "will try to resolve it together.")
 
 
 MAX_ATTACHMENTS = 5
@@ -1623,11 +1748,69 @@ def save_files(sid: str, user: dict, attachments: list[dict]) -> list[dict]:
     return out
 
 
-def share_files(sid: str, user: dict, text: str, files: list[dict]) -> None:
+# helper replies that are not observations a photo or a voice note could show
+_NOT_OBSERVATIONS = {HOW, CANT, NOT_SURE, SKIP_WHY, DONE, STEP_HOW, STEP_CANT, ALL_STEPS, WORKING, NOT_WORKING, CLOSE_REPLY}
+
+
+def _media_context(s: dict, check_id: str | None) -> tuple[str, dict | None]:
+    """What the attachment is about (equipment, report) and the check it may answer: the given condition check, or
+    the question pending in the chat. No check while fixing (a photo never taps Done)."""
+    area, eq = load_area(s["area_id"]), session_eq(s)
+    rep = s["report"]
+    ctx = (f"{eq['name']} ({eq['kind']}) in {area['name']}" if eq else f"somewhere in {area['name']}") + \
+          f"; reported: {s['symptom'] or 'an abnormal condition'}; severity {rep.get('severity') or s['severity']}"
+    if check_id and eq:
+        q = next((q for q in tree_for(eq["kind"])["questions"] if q["id"] == check_id), None)
+        return ctx, ({"text": q["text"], "options": [o["label"] for o in q["options"]]} if q else None)
+    if s["state"].get("phase") in ("fix", "verify") or s["state"].get("survey"):
+        return ctx, None
+    p = _last_prompt(s["id"])
+    opts = [r for r in (p or {}).get("replies") or [] if r not in _NOT_OBSERVATIONS]
+    return ctx, ({"text": p.get("prompt") or p.get("text"), "options": opts} if p and opts else None)
+
+
+def share_files(sid: str, user: dict, text: str, files: list[dict], caption: str = "", raw: list[dict] | None = None,
+                check_id: str | None = None) -> None:
     """A chat message carrying files. With text it is an ordinary turn; files alone are acknowledged and the
-    pending question or step is put back."""
+    pending question or step is put back. With a caption (evidence for the report or for one check) the files
+    are just filed under it: no turn, so the checks carry on undisturbed.
+
+    While SiteBrain is troubleshooting, the files are read (media.py) before anything else: a voice note's words
+    become the message, a photo or video that clearly shows one answer of the pending check answers it, and what
+    every file shows goes into the conversation. Once escalated they go to the expert as they are."""
     s = load_session(sid)
     text = (text or "").strip()
+    if s["mode"] == "bot" and raw and media.enabled():
+        ctx, question = _media_context(s, check_id)
+        tq = None
+        if check_id and session_eq(s):
+            tq = next((q for q in tree_for(session_eq(s)["kind"])["questions"] if q["id"] == check_id), None)
+        for f, a in zip(files, raw):
+            res = media.analyze(a, ctx, question)
+            if res and tq and res.get("kind") == "audio" and res.get("english"):
+                i = match_option(tq, res["english"])  # a spoken answer to the check, matched like a typed one
+                res["answer"] = tq["options"][i]["label"] if i is not None else None
+            if res:
+                f["analysis"] = res
+    read = [media.as_text(f.get("analysis")) for f in files if (f.get("analysis") or {}).get("summary")]
+    if caption.strip():
+        add_msg(sid, "user", text=caption.strip()[:200], author=user["name"], attachments=files, evidence=True,
+                **({"check_id": check_id} if check_id else {}))
+        if read:
+            s["state"].setdefault("notes", []).extend({"text": f"{caption.strip()[:80]}: {r}", "at": db.now_iso()}
+                                                      for r in read)
+            save_session(s)
+        return
+    if read and s["mode"] == "bot":
+        answers = {f["analysis"]["answer"] for f in files if (f.get("analysis") or {}).get("answer")}
+        spoken = [f["analysis"]["summary"] for f in files if (f.get("analysis") or {}).get("kind") == "audio"
+                  and f["analysis"].get("summary")]
+        if not text and len(answers) == 1 and not spoken:
+            heard = answers.pop()  # the photo shows the answer to the pending check
+        else:
+            heard = " ".join([text] + read).strip()
+        send(sid, heard, user, files=files, display=text)
+        return
     if user["role"] == "expert" and s["mode"] == "expert":
         human_expert_message(sid, user, text, None, None, files)
         return
@@ -1649,10 +1832,57 @@ def share_files(sid: str, user: dict, text: str, files: list[dict]) -> None:
             multi=bool(prompt and prompt.get("multi")))
 
 
-def escalate(sid: str, user: dict, reason: str, description: str = "", attachments: list[dict] | None = None) -> dict:
+def chat_summary(sid: str) -> str:
+    """A short summary of the chat so far, for the expert taking over (the operator sees it before escalating).
+    Written by the LLM when one is set up, else put together from the report, the checks and the causes."""
+    s = load_session(sid)
+    area, eq = load_area(s["area_id"]), session_eq(s)
+    st, rep = s["state"], s["report"] or {}
+    where = f"{eq['name']} ({eq['kind']}) in {area['name']}" if eq else f"{area['name']} (equipment not identified)"
+    if llm.available():
+        conv = transcript(sid)
+        if conv:
+            text = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in conv)[-12000:]
+            res = llm.complete_json(
+                "You hand a plant troubleshooting chat over to a technical expert. Summarise it in at most 120 words of "
+                "plain sentences: the problem and where, what the field operator checked and found, the likely causes "
+                "so far, anything already tried, and what is still open. No greeting, no markdown. "
+                "JSON {\"summary\": str}.",
+                [{"role": "user", "content": f"Equipment: {where}\n\n{text}"}],
+                {"type": "object", "additionalProperties": False, "required": ["summary"],
+                 "properties": {"summary": {"type": "string"}}}, max_tokens=500)
+            if (res or {}).get("summary", "").strip():
+                return res["summary"].strip()
+    lines = [f"{s['symptom'] or 'Issue reported'} on {where}, severity {s['severity']}."]
+    if rep.get("description"):
+        lines.append(f"Operator's description: {rep['description']}")
+    answered = [a for a in st.get("answers", []) if a.get("answer")]
+    if answered:
+        lines.append("Checks done: " + "; ".join(f"{a['question']} — {a['answer']}" for a in answered) + ".")
+    skipped = len(st.get("skipped", []))
+    if skipped:
+        lines.append(f"{skipped} check{'s' if skipped != 1 else ''} could not be done.")
+    if not answered and not skipped:
+        lines.append("No checks have been answered yet.")
+    found = next((m for m in reversed(messages(sid)) if m["type"] in ("finding", "solution")), None)
+    if found:
+        lines.append(f"SiteBrain's finding: {found.get('root_cause') or found.get('direct_cause')}.")
+    elif s["causes"]:
+        lines.append("Likely causes: " + ", ".join(f"{c['label']} ({round(c['likelihood'] * 100)}%)"
+                                                   for c in s["causes"][:3]) + ".")
+    flagged = st.get("suggested") or []
+    if flagged:
+        lines.append(f"Escalation suggested because: {'; '.join(flagged)}.")
+    return "\n".join(lines)
+
+
+def escalate(sid: str, user: dict, reason: str, description: str = "", attachments: list[dict] | None = None,
+             chat_sum: str = "") -> dict:
     """Hand the session to an L2/L3 expert. Only ever when the field operator taps Escalate, with their own
-    description and attachments ({filename, content_type, data}) for the expert's detailed analysis."""
+    description and attachments ({filename, content_type, data}) for the expert's detailed analysis, and the
+    summary of the chat they saw (written here when they sent none)."""
     description = (description or "").strip()
+    chat_sum = (chat_sum or "").strip()[:4000] or chat_summary(sid)
     attachments = attachments or []
     _check_files(attachments)
     s = load_session(sid)
@@ -1674,17 +1904,20 @@ def escalate(sid: str, user: dict, reason: str, description: str = "", attachmen
         urgency = "Critical" if crit else ("High" if s["severity"] == "High" or interlocks else "Medium")
         snap = telemetry.snapshot(eq, condition(s)) if eq else {"tags": {}}
         conv = [{"role": "field operator" if m["type"] in ("user", "report") else (m.get("who") or "SiteBrain"),
-                 "text": m.get("text") or (f"Root cause: {m.get('root_cause')}" if m["type"] == "solution" else "")}
+                 "text": " ".join(x for x in [m.get("text") or (f"Root cause: {m.get('root_cause')}"
+                                                                if m["type"] == "solution" else "")]
+                                  + [media.as_text(f.get("analysis")) for f in m.get("attachments") or []] if x)}
                 for m in messages(sid) if m["type"] in ("report", "user", "agent", "analysis", "solution")]
         payload = escalation.build_payload(ticket, site, area, eq, s, checkpoint_matrix(s, eq), conv, snap,
                                            interlocks, urgency, reason, s["causes"])
         files = [{"filename": a["filename"], "content_type": a["content_type"], "size": len(a["data"])} for a in attachments]
         payload["operator_request"] = {"requested_by": user["name"], "description": description, "attachments": files}
+        payload["chat_summary"] = chat_sum
         _, role_label = escalation.target_role(eq["kind"] if eq else None)
         top = s["causes"][0]["label"] if s["causes"] else None
         summary = f"{s['symptom']}. " + (f"Leading hypothesis: {top}." if top
                                           else f"Equipment not yet identified in {area['name']}." if not eq else "")
-        dispatched = escalation.dispatch(ticket, payload, attachments)
+        escalation.dispatch(ticket, payload, attachments, escalation.expert_emails(s["site_code"]))
     db.insert("escalations", {
         "ticket": ticket, "session_id": sid, "site_code": s["site_code"], "area_id": area["id"],
         "equipment_id": eq["id"] if eq else None, "urgency": urgency, "summary": summary.strip(),
@@ -1697,18 +1930,16 @@ def escalate(sid: str, user: dict, reason: str, description: str = "", attachmen
     for a, f in zip(attachments, files):
         f["id"] = db.insert("attachments", {"ticket": ticket, "session_id": sid, **f, "data": a["data"],
                                             "uploaded_by": user["name"], "created_at": now})
-    add_msg(sid, "escalation", ticket=ticket, author=user["name"], text=description, attachments=files)
-    event(sid, f"Escalated {ticket} · {reason}", "account-arrow-up-outline", "warn")
-    event(sid, f"Context package dispatched in {sw.ms} ms via " + ", ".join(sorted({d['channel'] for d in dispatched}))
-          + " · transcript, diagnostic matrix" + (" and 30-min SCADA snapshot" if eq else "")
-          + (f", {len(files)} file{'s' if len(files) > 1 else ''}" if files else "") + " attached",
-          "send-check-outline", "info")
+    add_msg(sid, "escalation", ticket=ticket, author=user["name"], text=description, attachments=files,
+            summary=chat_sum)
+    event(sid, f"Sent to the technical experts · {ticket}", "account-arrow-up-outline", "warn")
     save_session(s, mode="expert", status="escalated")
     db.audit(user["name"], user["role"], "escalation.dispatched", ticket,
              {"session": sid, "urgency": urgency, "trigger": reason, "compile_ms": sw.ms,
               "attachments": [f["filename"] for f in files]}, s["site_code"])
-    event(sid, f"Waiting for a {role_label} to join · SiteBrain has stepped back, so from here you chat directly "
-               "with the expert", "account-clock-outline", "info")
+    event(sid, "The experts have been notified by email with this chat, your photos and readings. They will reply "
+               "here when they can — you don't need to wait on this screen. You'll be notified when they reply.",
+          "email-fast-outline", "info")
     return db.q1("SELECT * FROM escalations WHERE ticket=?", (ticket,))
 
 
@@ -1729,7 +1960,7 @@ def human_expert_message(sid: str, user: dict, text: str, root_cause: str | None
     if not esc["claimed_by"]:
         db.update("escalations", "ticket", esc["ticket"], {"claimed_by": user["id"], "expert_name": user["name"],
                                                            "status": "In Progress"})
-        event(sid, f"{user['name']} ({user.get('title') or 'Technical Expert'}) joined the chat", "account-check-outline")
+        event(sid, f"{user['name']} ({user.get('title') or 'Technical Expert'}) is looking into this", "account-check-outline")
     if not esc["first_response_at"]:
         db.update("escalations", "ticket", esc["ticket"], {"first_response_at": db.now_iso()})
     who = f"{user['name']} · Technical Expert"
@@ -1738,6 +1969,7 @@ def human_expert_message(sid: str, user: dict, text: str, root_cause: str | None
     if root_cause and steps:
         add_msg(sid, "solution", who=user["name"], expert=True, root_cause=root_cause, steps=steps, basis="expert assessment")
         save_session(s, identified=1, root_cause=root_cause, steps=steps, identified_at=db.now_iso())
+    escalation.notify_reporter(esc["ticket"], s, user["name"], text, root_cause)
     db.audit(user["name"], user["role"], "expert.message", sid, {"solution": bool(root_cause)}, s["site_code"])
 
 

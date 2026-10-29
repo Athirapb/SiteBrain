@@ -67,12 +67,20 @@ MAX_DIAGNOSTIC_TURNS = int(os.getenv("SITEBRAIN_MAX_TURNS", "5"))
 CONFIDENCE_THRESHOLD = float(os.getenv("SITEBRAIN_CONFIDENCE", "0.85"))
 # Present-condition check: how many field checks are asked together, as one form, before the one-at-a-time
 # follow-ups (0 or 1 = ask one check at a time from the start)
-SURVEY_SIZE = int(os.getenv("SITEBRAIN_SURVEY", "4"))
+SURVEY_SIZE = int(os.getenv("SITEBRAIN_SURVEY", "0"))
 
 # Learning from resolved sessions: authored likelihoods count as LEARN_STRENGTH sessions of prior evidence
 LEARNING = os.getenv("SITEBRAIN_LEARNING", "true").lower() == "true"
 LEARN_STRENGTH = float(os.getenv("SITEBRAIN_LEARN_STRENGTH", "10"))
 
+# Reading attachments while SiteBrain troubleshoots (not once escalated): voice notes are transcribed, photos and
+# video frames are described and matched to the pending check, documents are read. Any OpenAI-compatible API with
+# speech-to-text and a vision model; by default the Groq key above (free tier).
+MEDIA_ENABLED = os.getenv("SITEBRAIN_MEDIA", "on").lower() not in ("off", "false", "0")
+MEDIA_API_KEY = os.getenv("MEDIA_API_KEY", GROQ_API_KEY)
+MEDIA_BASE_URL = os.getenv("MEDIA_BASE_URL", GROQ_BASE_URL)
+MEDIA_STT_MODEL = os.getenv("MEDIA_STT_MODEL", "whisper-large-v3-turbo")
+MEDIA_VISION_MODEL = os.getenv("MEDIA_VISION_MODEL", "qwen/qwen3.8-27b")
 
 # Optional outbound escalation channels (SRS §8: email/SMS digest; Teams webhook)
 TEAMS_WEBHOOK_URL = os.getenv("TEAMS_WEBHOOK_URL", "")
@@ -81,5 +89,12 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ESCALATION_EMAIL_TO = os.getenv("ESCALATION_EMAIL_TO", "")
+
+# The administrator, created on start-up when no user has this email. SITEBRAIN_ADMIN_PASSWORD is their password:
+# it is applied on every start, so changing it here (and restarting) changes it. The administrator sets the passwords
+# of the field operators and experts.
+ADMIN_EMAIL = os.getenv("SITEBRAIN_ADMIN_EMAIL", "").strip().lower()
+ADMIN_NAME = os.getenv("SITEBRAIN_ADMIN_NAME", "Administrator").strip() or "Administrator"
+ADMIN_PASSWORD = os.getenv("SITEBRAIN_ADMIN_PASSWORD", "")
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")

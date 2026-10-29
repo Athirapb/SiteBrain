@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config, db, knowledge, llm, seed
-from .routers import kb, misc, ops, plant, sessions, setup
+from .routers import admin, kb, misc, ops, plant, sessions, setup
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -28,7 +28,7 @@ app = FastAPI(title="SiteBrain AI", version="1.0.0", lifespan=lifespan,
 app.add_middleware(CORSMiddleware, allow_origins=config.CORS_ORIGINS, allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
-for r in (misc.router, plant.router, setup.router, sessions.router, ops.router, kb.router):
+for r in (misc.router, admin.router, plant.router, setup.router, sessions.router, ops.router, kb.router):
     app.include_router(r)
 
 

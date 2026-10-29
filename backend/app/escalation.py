@@ -84,6 +84,8 @@ def digest(payload: dict) -> tuple[str, str, str]:
         f"Symptom: {d['primary_symptom']}",
         f"AI checks: {d['turns_executed']} · confidence {int(d['ai_confidence_score'] * 100)}%",
     ]
+    if payload.get("chat_summary"):
+        lines += ["", "Summary of the chat so far:"] + [f"  {x}" for x in payload["chat_summary"].splitlines() if x.strip()]
     req = payload.get("operator_request") or {}
     if req.get("description"):
         lines += ["", f"Field operator's description ({req['requested_by']}):", f"  {req['description']}"]
@@ -103,37 +105,55 @@ def digest(payload: dict) -> tuple[str, str, str]:
     return subject, body, sms
 
 
-def dispatch(ticket: str, payload: dict, attachments: list[dict] | None = None) -> list[dict]:
+def expert_emails(site_code: str) -> list[str]:
+    """Active technical experts who cover this plant (fleet-wide experts cover every plant)."""
+    return [u["email"] for u in db.q("SELECT email FROM users WHERE role='expert' AND active "
+                                     "AND (site_code IS NULL OR site_code=?) ORDER BY id", (site_code,))]
+
+
+def send_email(to: str, subject: str, body: str, files: list[tuple[str, str, bytes]] = ()) -> str:
+    """Send through SMTP when it is configured: 'sent' or 'failed'; 'logged' when there is no SMTP server or no
+    recipient (the outbox keeps every message either way). files: (filename, content type, data)."""
+    if not (config.SMTP_HOST and to):
+        return "logged"
+    try:
+        msg = EmailMessage()
+        msg["Subject"], msg["From"], msg["To"] = subject, config.SMTP_USER or "sitebrain@localhost", to
+        msg.set_content(body)
+        for name, ctype, data in files:
+            main, _, sub = (ctype or "application/octet-stream").partition("/")
+            msg.add_attachment(data, maintype=main, subtype=sub or "octet-stream", filename=name)
+        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=10) as s:
+            s.starttls()
+            if config.SMTP_USER:
+                s.login(config.SMTP_USER, config.SMTP_PASSWORD)
+            s.send_message(msg)
+        return "sent"
+    except (OSError, smtplib.SMTPException) as e:
+        log.warning("SMTP dispatch failed: %s", e)
+        return "failed"
+
+
+def _outbox(ticket: str, channel: str, recipient: str, subject: str, body: str, status: str) -> dict:
+    db.insert("outbox", {"ticket": ticket, "channel": channel, "recipient": recipient, "subject": subject,
+                         "body": body, "status": status, "created_at": db.now_iso()})
+    return {"channel": channel, "recipient": recipient, "status": status}
+
+
+def dispatch(ticket: str, payload: dict, attachments: list[dict] | None = None,
+             recipients: list[str] | None = None) -> list[dict]:
+    """Notify the experts. The escalation is answered when they get to it, not as a live chat, so the email
+    carries everything they need. ESCALATION_EMAIL_TO overrides the list of experts for the plant."""
     subject, body, sms = digest(payload)
     results = []
 
     def out(channel, recipient, subj, text, status):
-        db.insert("outbox", {"ticket": ticket, "channel": channel, "recipient": recipient, "subject": subj,
-                             "body": text, "status": status, "created_at": db.now_iso()})
-        results.append({"channel": channel, "recipient": recipient, "status": status})
+        results.append(_outbox(ticket, channel, recipient, subj, text, status))
 
-    # Email digest
-    status = "logged"
-    if config.SMTP_HOST and config.ESCALATION_EMAIL_TO:
-        try:
-            msg = EmailMessage()
-            msg["Subject"], msg["From"], msg["To"] = subject, config.SMTP_USER or "sitebrain@localhost", config.ESCALATION_EMAIL_TO
-            msg.set_content(body)
-            msg.add_attachment(json.dumps(payload, indent=2).encode(), maintype="application", subtype="json",
-                               filename=f"{ticket}.json")
-            for a in attachments or []:
-                main, _, sub = (a["content_type"] or "application/octet-stream").partition("/")
-                msg.add_attachment(a["data"], maintype=main, subtype=sub or "octet-stream", filename=a["filename"])
-            with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=10) as s:
-                s.starttls()
-                if config.SMTP_USER:
-                    s.login(config.SMTP_USER, config.SMTP_PASSWORD)
-                s.send_message(msg)
-            status = "sent"
-        except (OSError, smtplib.SMTPException) as e:
-            log.warning("SMTP dispatch failed: %s", e)
-            status = "failed"
-    out("email", config.ESCALATION_EMAIL_TO or "l3-experts@site.local", subject, body, status)
+    to = config.ESCALATION_EMAIL_TO or ", ".join(recipients or [])
+    files = [(f"{ticket}.json", "application/json", json.dumps(payload, indent=2).encode())]
+    files += [(a["filename"], a["content_type"], a["data"]) for a in attachments or []]
+    out("email", to or "l3-experts@site.local", subject, body, send_email(to, subject, body, files))
     out("sms", "+91-L3-ONCALL", subject, sms, "logged")
 
     if config.TEAMS_WEBHOOK_URL:
@@ -158,3 +178,19 @@ class Stopwatch:
 
     def __exit__(self, *a):
         self.ms = int((time.perf_counter() - self.t) * 1000)
+
+
+def notify_reporter(ticket: str, session: dict, expert_name: str, text: str, root_cause: str | None) -> dict | None:
+    """An expert replied: tell the person who reported the issue, so they don't have to wait in the app."""
+    u = db.q1("SELECT email, name FROM users WHERE id=?", (session.get("user_id"),)) if session.get("user_id") else None
+    if not u:
+        return None
+    subject = f"{ticket} · {expert_name} replied about {session.get('symptom') or 'your issue'}"
+    lines = [f"Hello {u['name']},", "", f"{expert_name} replied on {ticket} ({session['id']}):", ""]
+    if text:
+        lines.append(text)
+    if root_cause:
+        lines += ["", f"Root cause: {root_cause}"]
+    lines += ["", "Open SiteBrain → My Past Issues to see the full reply and continue."]
+    body = "\n".join(lines)
+    return _outbox(ticket, "email", u["email"], subject, body, send_email(u["email"], subject, body))

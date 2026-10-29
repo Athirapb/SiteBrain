@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Empty, Icon, Modal, PillTabs, Spinner, Stat, fmtDate, useAsync, usePoll } from "../components/ui";
+import { Empty, Icon, Modal, PillTabs, Spinner, fmtDate, useAsync, usePoll } from "../components/ui";
+import History from "./History";
 import { CAT_COLOR, CAT_LABEL, CatChip, Fishbone, WhyChain } from "../components/rca";
 
 const KINDS = ["Agitator", "Pump", "Compressor", "Blower", "Decanter", "WAM", "Shredder", "HWG", "Chiller", "Scrubber", "Filter", "Membrane", "Machine"];
 
-export default function KnowledgeBase({ user, notify }) {
+export default function KnowledgeBase({ user, notify, nav }) {
   const [tab, setTab] = useState("cases");
   const canWrite = user.permissions.includes("kb.write");
   const stats = useAsync(() => api.get("/api/kb/brain"), []);
@@ -14,26 +15,25 @@ export default function KnowledgeBase({ user, notify }) {
     setTraining(true);
     try {
       const r = await api.post("/api/kb/train");
-      notify(`Knowledge brain trained · ${r.documents_added} new and ${r.documents_updated} updated documents`);
+      notify(`Knowledge base updated · ${r.documents_added} new and ${r.documents_updated} updated documents`);
       stats.reload();
     } catch (e) { notify(e.message, true); } finally { setTraining(false); }
   };
-  const b = stats.data;
-  const hist = b?.history_import;
+  const hist = stats.data?.history_import;
   usePoll(() => stats.reload(), hist?.running ? 4000 : 0, [hist?.running]);
+  // reporters see what helps on the floor; experts also see how SiteBrain reasons and the operating envelopes
+  const tabs = [["cases", "Past Cases"], ["hist", "Case History"], ["docs", "Manuals & SOPs"],
+                ...(canWrite ? [["lib", "Troubleshooting Library"], ["cond", "Operating Conditions"]] : [])];
   return (
     <div className="page">
-      <div className="stats">
-        <Stat label="Equipment Types Modelled" value={b?.equipment_types} hint={b ? `${b.direct_causes} direct causes · ${b.field_checks} field checks` : ""} />
-        <Stat label="Root Causes (5-Why)" value={b?.root_causes} hint="systemic causes with preventive actions" />
-        <Stat label="RCA Cases" value={b?.cases} hint={b ? `${b.rca_cases} with why-chains · ${b.history_cases} from ${b.history_projects} projects' PIR/RCA reports` : ""} />
-        <Stat label="Documents Indexed" value={b?.documents} hint={b ? `${b.passages} passages${b.embeddings?.enabled ? " · semantic search on" : ""} · ${b.operating_profiles} operating profiles` : ""} />
+      <div>
+        <div className="page-title">Knowledge Base</div>
+        <div className="page-sub">How past problems were solved, every issue reported in the plant, and the manuals and SOPs.</div>
       </div>
       <div className="row wrap">
-        <PillTabs value={tab} onChange={setTab} options={[["cases", "RCA Cases"], ["lib", "Troubleshooting Library"],
-                                                         ["cond", "Operating Conditions"], ["docs", "Manuals, SOPs & Logs"]]} />
+        <PillTabs value={tab} onChange={setTab} options={tabs} />
         <span className="grow" />
-        {canWrite && <button className="btn ghost sm" onClick={train} disabled={training}><Icon name="brain" />{training ? "Training…" : "Retrain Knowledge Brain"}</button>}
+        {canWrite && <button className="btn ghost sm" onClick={train} disabled={training}><Icon name="refresh" />{training ? "Updating…" : "Refresh Knowledge"}</button>}
       </div>
       {hist?.running && (
         <div className="safety" style={{ alignItems: "center" }}>
@@ -42,6 +42,7 @@ export default function KnowledgeBase({ user, notify }) {
         </div>
       )}
       {tab === "cases" && <Cases canWrite={canWrite} notify={notify} />}
+      {tab === "hist" && <History user={user} nav={nav} embedded />}
       {tab === "lib" && <Library />}
       {tab === "cond" && <Conditions />}
       {tab === "docs" && <Docs canWrite={canWrite} notify={notify} />}
@@ -216,7 +217,7 @@ function Conditions() {
   ));
 }
 
-const SOURCE_TABS = [["all", "All Sources"], ["pir", "Historic PIR"], ["rca", "Historic RCA"], ["copilot", "Learned From Copilot"], ["curated", "Curated"]];
+const SOURCE_TABS = [["all", "All Sources"], ["pir", "Historic PIR"], ["rca", "Historic RCA"], ["copilot", "Learned In The App"], ["curated", "Curated"]];
 const PAGE = 60;
 
 function Cases({ canWrite, notify }) {
@@ -228,6 +229,7 @@ function Cases({ canWrite, notify }) {
   const [limit, setLimit] = useState(PAGE);
   const [adding, setAdding] = useState(false);
   const [open, setOpen] = useState(null);
+  const [filters, setFilters] = useState(false);
   useEffect(() => { const t = setTimeout(() => setDq(q), 250); return () => clearTimeout(t); }, [q]);
   useEffect(() => setLimit(PAGE), [kind, source, project, dq]);
   const cases = useAsync(() => api.get(`/api/kb/cases?kind=${encodeURIComponent(kind)}&q=${encodeURIComponent(dq)}`
@@ -245,14 +247,21 @@ function Cases({ canWrite, notify }) {
           <option value="">All Projects</option>
           {(cases.data?.projects || []).map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
+        <button className={`btn sm ${filters ? "" : "ghost"}`} onClick={() => setFilters((x) => !x)}>
+          <Icon name="filter-variant" />Filters{kind !== "All" || source !== "all" ? " · on" : ""}
+        </button>
         {canWrite && <button className="btn" onClick={() => setAdding(true)}><Icon name="plus" />Add Verified Case</button>}
       </div>
-      <PillTabs value={source} onChange={setSource} options={SOURCE_TABS} />
-      <PillTabs value={kind} onChange={setKind} options={[["All", "All Types"], ...kinds.map((k) => [k, k])]} />
+      {filters && (
+        <>
+          <PillTabs value={kind} onChange={setKind} options={[["All", "All Equipment"], ...kinds.map((k) => [k, k])]} />
+          <PillTabs value={source} onChange={setSource} options={SOURCE_TABS} />
+        </>
+      )}
       <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start" }}>
         <div style={{ flex: "2 1 480px", minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
           <div className="row" style={{ alignItems: "baseline" }}>
-            <div className="section-title">Root Cause Analysis Cases</div>
+            <div className="section-title">Past Cases</div>
             {cases.data && <span className="caption">{cases.data.matched} of {cases.data.total} cases</span>}
           </div>
           {!cases.data ? <Spinner /> : cases.data.items.map((k) => (
@@ -260,21 +269,21 @@ function Cases({ canWrite, notify }) {
               <div className="row wrap" style={{ gap: 12 }}>
                 <span style={{ fontWeight: 600, color: "var(--gps-primary)" }}>{k.id}</span>
                 <span className="caption" style={{ color: "var(--t60)" }}>{k.kinds.join(" · ")}</span>
-                {k.is_new && <span className="tag" style={{ color: "#006400", background: "#e3f2d4" }}>Learned From Copilot</span>}
+                {k.is_new && <span className="tag" style={{ color: "#006400", background: "#e3f2d4" }}>Learned In The App</span>}
                 {k.historic && <span className="tag" style={{ color: "#1c6fc1", background: "#e8f2fd" }}>{k.id.startsWith("RCA-") ? "Historic RCA" : "Historic PIR"}</span>}
                 <span className="caption" style={{ marginLeft: "auto" }}>{k.source}</span>
               </div>
               <div style={{ fontSize: 16, fontWeight: 600, color: "var(--t80)" }}>{k.title}</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
-                <div><div className="row" style={{ gap: 8 }}><span className="overline">Root Cause</span>{k.category && CAT_LABEL[k.category] && <CatChip category={k.category} />}</div>
+                <div><div className="row" style={{ gap: 8 }}><span className="overline">Cause</span></div>
                   <div style={{ lineHeight: 1.5, color: "var(--t80)" }}>{k.cause}</div></div>
-                <div><div className="overline">Resolution</div><div style={{ lineHeight: 1.5, color: "var(--t80)" }}>{k.fix}</div></div>
-                {k.prevent && <div><div className="overline">Prevention</div><div style={{ lineHeight: 1.5, color: "var(--t80)" }}>{k.prevent}</div></div>}
+                <div><div className="overline">What fixed it</div><div style={{ lineHeight: 1.5, color: "var(--t80)" }}>{k.fix}</div></div>
+                {k.prevent && <div><div className="overline">Stop it coming back</div><div style={{ lineHeight: 1.5, color: "var(--t80)" }}>{k.prevent}</div></div>}
               </div>
               {k.why_chain?.length > 0 && (
-                <details><summary className="caption" style={{ cursor: "pointer", color: "#1c6fc1", fontWeight: 600 }}>5-Why chain ({k.why_chain.length} steps)</summary>
+                <details><summary className="caption" style={{ cursor: "pointer", color: "#1c6fc1", fontWeight: 600 }}>How they got to the cause</summary>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingTop: 6 }}>
-                    {k.why_chain.map((w, i) => <div key={i} className="caption" style={{ color: "var(--t70)" }}><b>W{i + 1}</b> {w}</div>)}
+                    {k.why_chain.map((w, i) => <div key={i} className="caption" style={{ color: "var(--t70)" }}>{i + 1}. {w}</div>)}
                   </div>
                 </details>
               )}

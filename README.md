@@ -7,6 +7,9 @@ SiteBrain is a conversational operations and technical-escalation copilot for Bi
 - **Present condition first.** Before narrowing down, SiteBrain asks a set of field checks together in one form (4 by default, `SITEBRAIN_SURVEY`; 0 = one at a time). The set is chosen for the most information as a whole, so it covers different bones of the fishbone. All answers update the fishbone at once. Targeted one-at-a-time checks follow until one cause reaches the confidence threshold. The newest fishbone card in the chat updates live as answers come in.
 - **Talks like a colleague.** Each check says why it's being asked. The technician can tap *How do I check this?* or *I can't check this*, or answer in their own words. Each answer is acknowledged with what it rules out or points to.
 - **Safety interlocks.** Hazards in the report or the answers raise interlocks and advisories. They are recorded for the control room and shown beside the chat, but they never hold up the troubleshooting (there is no sign-off step).
+- **Short, chat-sized messages.** Every SiteBrain message is at most three short sentences, like a WhatsApp message from a colleague. The LLM is told to write that way, and `crisp()` trims anything longer while keeping the question or step being asked. Why a check matters folds away behind *Why?*. Experts' own messages are never trimmed.
+- **Answer by voice.** Next to the answers there is *Say it* (and *Say your answer* on a condition check). Tap, speak, and the recording is transcribed (any language) and matched to the options on screen by `match_spoken()`: "the first one", "about 90 degrees" (the range it falls in), "dark with metal fines and the level is low" (several on a multi-answer check), "I can't check it", "done", with the LLM as a last resort. A single-answer question is answered straight away; on a multi-answer check or a condition check the matches are ticked for you to confirm. On the report form, a voice note also ticks the symptoms it mentions.
+- **Voice notes, photos and videos are read.** While SiteBrain is troubleshooting, every attachment is read (`media.py`, on the Groq key, free tier). Voice notes are transcribed by Whisper in any language, with an English version for the engine. A voice note in the chat counts as the operator's words, and one on the report form is written into the description. Photos are described by a vision model, which also says which answer of the pending check they show. A clear match answers it in the chat, or pre-selects it on a condition check; an unclear one is only a hint. Videos give a tiled strip of frames plus their soundtrack. PDFs, spreadsheets and CSV logs are summarised. What was heard or seen is shown under each file, goes to the LLM, and reaches the expert's package. Once the issue is escalated, files go to the expert as they are, unread. `SITEBRAIN_MEDIA=off` only stores them.
 - **Files in the chat.** The field operator (or the expert) can attach photos, videos, PDFs, spreadsheets and documents to any message: up to 5 files of 10 MB each, by the paperclip, drag and drop or paste. If the issue is escalated later, the files go to the expert's ticket too.
 - **Resolve & close.** Only the field operator can mark an issue resolved and close it. They confirm first, because closing ends the chat. A confirmed root cause is saved to the knowledge base. Without one, the issue is logged as closed, with an optional note on how it was settled.
 - **Expert escalation.** Escalation to an L2/L3 expert happens only when the field operator taps *Escalate To Expert*. They add a description and up to 5 attachments (photos, videos, documents; 10 MB each) for the expert's analysis. SiteBrain never escalates on its own; when it can't reach a confident answer it recommends escalating. The full context goes with the escalation: the operator's description and files, the issue report, the transcript, the diagnostic matrix and a 30-minute SCADA snapshot.
@@ -41,7 +44,7 @@ cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cd frontend && npm install && npm run dev           # http://localhost:5173 (proxies /api → :8000)
 ```
 
-To reset the demo data, run `cd backend && .venv/bin/python -m app.seed --reset` (drops and recreates all SiteBrain tables). A database created by an older schema version (for example one with shift-checksheet readings) is rebuilt automatically on startup.
+To reset the demo data, run `cd backend && .venv/bin/python -m app.seed --reset` (drops and recreates all SiteBrain tables). A v2 database is migrated in place on startup (email sign-in, PST area), keeping its issues, cases and documents; older ones are rebuilt.
 
 ### Database
 
@@ -85,25 +88,36 @@ What the copilot knows lives in `backend/app/brain/`, one module per equipment g
 
 The numeric ranges come from published literature and OEM practice, not this plant's design data. A process engineer should confirm them against the nameplates and commissioning records.
 
-## Demo users (two roles)
+## Users and sign-in
 
-| User | Role | Lands on |
+Everyone signs in with **email and password**. Nobody is seeded except the **administrator**, set in `backend/.env`:
+
+```env
+SITEBRAIN_ADMIN_EMAIL=you@gpsrenewables.com
+SITEBRAIN_ADMIN_NAME=Your Name
+SITEBRAIN_ADMIN_PASSWORD=...     # 8+ characters; applied on every start, so change it here and restart
+```
+
+The administrator adds the field operators and experts and **sets their passwords** (typed or generated, then passed on to the person). *Set Password* gives someone a new one and signs them out. Passwords are stored as scrypt hashes. The sign-in page works like the GPS LLF app: pick **Field Operator** or **Technical Expert**, then enter email and password (the *Administrator sign in* link is below the cards). Each account signs in only through its own card.
+
+| Role | Who | Sections |
 |---|---|---|
-| Field Operator 1 (`operator1`) | Field Operator (LLF site) | Copilot: report and troubleshoot issues, safety sign-offs, request overrides |
-| Field Operator 2 (`operator2`) | Field Operator (Demo Plant North) | Same, for the second site |
-| Expert 1 / Expert 2 (`expert1`, `expert2`) | L3 / L2 Technical Expert (all sites) | Expert Queue; Control Room (release interlocks, approve overrides, audit); Dashboards; Plant Setup; Knowledge Base editing |
+| Field Operator | Shift In-Charge, Mechanical / E&I Engineers, Plant Manager | Report An Issue · My Past Issues · Knowledge Base |
+| Technical Expert | Central O&M team, Design Engineers (one plant, or all plants) | Issues Queue · My Past Resolutions · Knowledge Base |
+| Administrator | From `SITEBRAIN_ADMIN_EMAIL` / `SITEBRAIN_ADMIN_PASSWORD` | Users: add with a password, edit, set a new password, switch off, delete (only without history) |
+
+The administrator sets each user's plant, designation, usual project and usual area. The project and area are filled in on that user's issue reports.
 
 ## Demo script
 
-1. **Safety interlock.** Sign in as **Field Operator 1**. The Copilot opens on *Report An Issue*. Pick **Digester 2 → D2 Agitator 3**, select *High vibration* and *Abnormal noise*, set severity **Critical** and press *Start Troubleshooting*. Interlock ROT-01 (LOTO) engages from the report. Tick the box and press *Acknowledge & Continue*; the chat stays blocked until you do.
-2. **Fishbone → 5-Why.** Answer *Intact, no play* → *Above 85°C* → *Dark with metal fines*. The fishbone narrows to **gearbox output bearing wear** (KB-0412), and SiteBrain gives the immediate corrective actions. It then asks "why?" until it reaches a systemic root cause. Pick an answer, type your own explanation, or *Skip to the fix*. A compact root-cause card follows, with the why chain and preventive actions folded away. SiteBrain then walks you through the corrective steps one at a time (*Done* / *How do I do this?* / *I can't do this step*) and asks whether it's working. *Yes* resolves the issue and saves the RCA to the Knowledge Base as a new case; *No* goes back to the fishbone with that cause ruled out. You can type a question or extra information at any point: SiteBrain answers it and then repeats the pending check or step.
-3. **Area-level report.** Report an issue on **Digester 2** with the equipment left at *Not sure / whole area*. SiteBrain asks which equipment, ranking the candidates by how well their type fits the symptoms. Answer with a name, or *Not sure* to narrow it down by equipment type. Naming the equipment in the description (for example "LP 1 is knocking") localizes it immediately. If it still can't be pinned down, SiteBrain recommends escalating with the area context.
-4. **SRS §4.1 scrubber flow.** Report on **H2S Scrubber Vessel** with *Pressure / dP abnormal*. Answering *Perimeter seal gap observed* engages SCR-01 (filter bypass locked closed). *Sudden drop* then identifies bed channeling and gives the media re-seating, mesh re-alignment and flushing steps from SOP-SCR-02.
-5. **Contradiction escalation.** Report *High vibration* on **LP 2** and answer *No unusual noise*. SCADA shows rising vibration, so SiteBrain flags the contradiction and **recommends an expert**. Tap *Escalate To Technical Expert*, describe the problem and attach a photo or video. The context package is compiled in milliseconds. From then on SiteBrain steps back and the chat is between the field operator and the expert.
-6. **Expert workspace.** Sign in as **Expert 1** and open the Expert Queue. *Payload* shows the SRS JSON, the diagnostic matrix (reported symptoms and field-check answers), the SCADA window and the email/SMS digest. *Claim* takes the ticket; *Open Chat* (or *Respond*) talks with the field operator directly, and *Share Resolution* sends the confirmed root cause and fix steps.
-7. **Blocked bypass.** Report *Gas smell / gas leak* on **Gas Blower 1**. GAS-01 engages and the session goes Critical. Request a bypass override on it: it is **blocked automatically**, because personnel-safety interlocks are non-overridable. Sign in as **Expert 1** to approve or reject the overrides that are allowed, release interlocks with a verification note, and read the append-only audit trail.
-8. **Plant Setup.** As **Expert 1**, open Plant Setup to add, edit, deactivate or delete areas and equipment. The equipment type decides which field checks SiteBrain asks. Anything with issue history can only be deactivated.
-9. **Dashboards.** Sign in as **Expert 1** for the Daily, Weekly and Monthly dashboards, at site or fleet scope.
+1. **Set up.** Sign in as the administrator and add a field operator (plant *LLF Biogas Plant*, usual area *Digester 2*) and an expert (all plants), giving each a password.
+2. **Report.** Sign in as the field operator. *Report An Issue* opens with the project and area filled in. Pick **D2 Agitator 3**, *Abnormal noise*, and attach a photo or record a voice note. Press *Start Troubleshooting*.
+3. **Quick analysis.** SiteBrain lists the possible causes, most likely first, then asks four checks one at a time (*Check 1 of 4*). Answers are blue chips; Next / Send are green buttons. Each check can take a photo, video or voice note. *Similar Past Cases* sits at the bottom right.
+4. **Detailed analysis and resolution.** SiteBrain asks why it happened until it reaches the root cause, then walks through the fix one step at a time, with the safety note on the steps that need it. *Yes, it's working* resolves and closes the issue and saves it to the Knowledge Base.
+5. **Expert help.** When SiteBrain can't get to a confident answer it says *I'd recommend bringing in a technical expert…* with **Escalate to Technical Expert** or **Will try to resolve myself**. The ⋮ menu also has *Get expert help* and *It's fixed — close the issue* at any time. Escalating emails the experts (the outbox when SMTP is not configured); it is not a live chat.
+6. **Expert.** Sign in as the expert. The *Issues Queue* shows new issues and those waiting for a reply. The issue opens with the chat in the middle and an **Issue Summary** on the right (reported issue, findings so far, every photo/video/file, similar cases) plus **Plant Live Data** (simulated in this version). A reply emails the reporter, whose *My Past Issues* marks it *Expert replied*. *Share Resolution* sends the confirmed cause and fix steps.
+
+The control room, dashboards and plant setup APIs are still in the backend, but they are not in the navigation of any role.
 
 ## How the SRS maps to the build
 
@@ -124,7 +138,7 @@ The numeric ranges come from published literature and OEM practice, not this pla
 
 ## Data notes
 
-- **Areas and equipment.** The seed parses all 111 equipment items from `backend/data/LLF_Checksheet.xlsx`, one area per sheet (BUU, D1–D4, HWG, SLS, FEED, CDT). The workbook is used only for this inventory; its checkpoints are not used. The §5 process skids the workbook doesn't list (H₂S Scrubber Vessel, Gas Filtration Skid, Membrane Upgrader) are added to the BUU. That makes 114 equipment per site. Edit them in Plant Setup.
+- **Areas and equipment.** The seed parses all 111 equipment items from `backend/data/LLF_Checksheet.xlsx`, one area per sheet (BUU, D1–D4, HWG, SLS, FEED, CDT), with the *CDT & PST* sheet split into Primary Sludge Tank (the `PST …` equipment) and Concentrated Digestate Tank. Areas are listed in process order: FEED, PST, D1–D4, HWG, CDT, SLS, BUU. The workbook is used only for this inventory; its checkpoints are not used. The §5 process skids the workbook doesn't list (H₂S Scrubber Vessel, Gas Filtration Skid, Membrane Upgrader) are added to the BUU. That makes 114 equipment per site. Edit them in Plant Setup.
 - **Sites.** There are three sites: the LLF plant plus two demo sites for the fleet view.
 - **Simulated data.** SCADA telemetry is **simulated** (`telemetry.py`). There is no live MQTT/OPC-UA feed in the MVP, so values follow the open issue on the equipment (reported symptoms, severity and hazards found during diagnosis). Without an open issue they stay at baseline. Session history older than today is **synthetic**, generated deterministically so that the weekly and monthly dashboards have trends.
 - **Seed documents.** The SOP, OEM, RCA-guide and incident-log documents in `backend/data/docs` were researched and written for this demo; they are not the plant's own records. They are indexed on start.

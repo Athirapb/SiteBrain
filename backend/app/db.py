@@ -33,11 +33,16 @@ CREATE TABLE IF NOT EXISTS sites (
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    username TEXT UNIQUE NOT NULL,
-    role TEXT NOT NULL,              -- field_operator | expert
-    title TEXT,
+    email TEXT UNIQUE NOT NULL,      -- the sign-in id, stored lower-case
+    role TEXT NOT NULL,              -- field_operator | expert | admin
+    title TEXT,                      -- designation, e.g. Shift In-Charge, Design Engineer
     site_code TEXT REFERENCES sites(code),  -- NULL = fleet-wide access
-    token TEXT UNIQUE
+    project_id INTEGER,              -- prefilled on the issue report
+    area_code TEXT,                  -- prefilled on the issue report (an area code of the user's site)
+    password_hash TEXT,              -- set by the administrator (the administrator's own comes from .env)
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TEXT,
+    token TEXT UNIQUE                -- session after signing in
 );
 
 -- Plant areas (units) and their equipment, maintained from the Plant Setup screen
@@ -275,11 +280,11 @@ CREATE TABLE IF NOT EXISTS counters (
 """
 
 # `readings` is the retired shift-checksheet table; it stays here so a reset drops it from older databases.
-ALL_TABLES = ["attachments", "projects", "audit_log", "outbox", "chunks", "documents", "overrides", "interlocks", "escalations", "cases",
+ALL_TABLES = ["auth_flows", "attachments", "projects", "audit_log", "outbox", "chunks", "documents", "overrides", "interlocks", "escalations", "cases",
               "messages", "sessions", "readings", "equipment", "areas", "users", "sites", "counters"]
 
 # Bump when SCHEMA changes incompatibly; seed() rebuilds a database created by an older version.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 
 
 def now_iso() -> str:

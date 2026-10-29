@@ -16,10 +16,13 @@ from pathlib import Path
 UNIT_NAMES = {
     "BUU": "Biogas Upgradation Unit", "D1": "Digester 1", "D2": "Digester 2", "D3": "Digester 3",
     "D4": "Digester 4", "HWG": "Hot Water Generator", "SLS": "Solid-Liquid Separation",
-    "FEEDING H1 AND H2": "Feeding H1 & H2", "CDT AND PST": "CDT & PST",
+    "FEEDING H1 AND H2": "Feeding H1 & H2", "CDT AND PST": "Concentrated Digestate Tank",
+    "PST": "Primary Sludge Tank",
 }
 UNIT_CODES = {"FEEDING H1 AND H2": "FEED", "CDT AND PST": "CDT"}
-UNIT_ORDER = ["BUU", "D1", "D2", "D3", "D4", "HWG", "SLS", "FEED", "CDT"]
+# The plant's process order (feed → digestion → heating → digestate handling → gas upgrading), as the O&M team
+# reads it; the area pickers follow it.
+UNIT_ORDER = ["FEED", "PST", "D1", "D2", "D3", "D4", "HWG", "CDT", "SLS", "BUU"]
 
 KIND_ICON = {
     "Agitator": "fan", "Pump": "pump", "Blower": "weather-windy", "Compressor": "engine-outline",
@@ -157,7 +160,10 @@ def parse_checksheet(path: Path) -> list[dict]:
                 # a real equipment block has at least one numbered checkpoint row under the header
                 nxt = rows[r + 1] if r + 1 < len(rows) else []
                 if name and c < len(nxt) and isinstance(nxt[c], (int, float)):
-                    out.append({"unit": unit, "unit_name": unit_name, "name": title_case(name), "kind": kind_of(name)})
+                    u, un = unit, unit_name
+                    if unit == "CDT" and name.strip().upper().startswith("PST"):
+                        u, un = "PST", UNIT_NAMES["PST"]  # the CDT & PST sheet holds two areas
+                    out.append({"unit": u, "unit_name": un, "name": title_case(name), "kind": kind_of(name)})
     wb.close()
     return out
 

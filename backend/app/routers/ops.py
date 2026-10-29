@@ -33,13 +33,26 @@ def _ago(iso: str) -> str:
 
 @router.get("/escalations")
 def escalations(site: str = Depends(site_scope), user: dict = Depends(require("esc.read")),
-                equipment_id: str | None = None, status: str | None = None, limit: int = Query(60, le=500)):
+                equipment_id: str | None = None, status: str | None = None, mine: bool = False,
+                scope: str = Query("site"), limit: int = Query(60, le=500)):
+    """The escalations of a plant, or of every plant (scope=fleet) for a fleet-wide expert. mine: the ones this
+    expert answered."""
+    fleet = scope == "fleet" and not user["site_code"]
     sql = ("SELECT x.ticket, x.session_id, x.equipment_id, x.urgency, x.summary, x.trigger_reason, x.expert_name, "
            "x.expert_role, x.claimed_by, x.status, x.turns, x.compile_ms, x.created_at, x.first_response_at, x.resolved_at, "
-           "COALESCE(e.name, a.name) AS eq_name, a.name AS unit_name, (x.equipment_id IS NULL) AS area_level "
-           "FROM escalations x JOIN areas a ON a.id=x.area_id "
-           "LEFT JOIN equipment e ON e.id=x.equipment_id WHERE x.site_code=?")
-    params: list = [site]
+           "COALESCE(e.name, a.name) AS eq_name, a.name AS unit_name, (x.equipment_id IS NULL) AS area_level, "
+           "x.site_code, st.name AS site_name, s.symptom, s.severity, s.report->>'reported_by' AS reported_by, "
+           "s.report->>'project' AS project, s.root_cause, "
+           # the reporter spoke last: the expert has something to answer
+           "COALESCE((SELECT m.type='user' FROM messages m WHERE m.session_id=x.session_id "
+           "AND (m.type='user' OR m.payload->>'expert'='true') ORDER BY m.id DESC LIMIT 1), false) AS awaiting_expert "
+           "FROM escalations x JOIN areas a ON a.id=x.area_id JOIN sites st ON st.code=x.site_code "
+           "LEFT JOIN sessions s ON s.id=x.session_id "
+           "LEFT JOIN equipment e ON e.id=x.equipment_id WHERE " + ("TRUE" if fleet else "x.site_code=?"))
+    params: list = [] if fleet else [site]
+    if mine:
+        sql += " AND x.claimed_by=?"
+        params.append(user["id"])
     if equipment_id:
         sql += " AND x.equipment_id=?"
         params.append(equipment_id)
@@ -117,7 +130,7 @@ def claim(ticket: str, user: dict = Depends(require("esc.work"))):
                                                 "expert_role": user["title"], "status": "In Progress",
                                                 "first_response_at": x["first_response_at"] or db.now_iso()})
     if x["session_id"]:
-        diagnosis.event(x["session_id"], f"{user['name']} ({user['title']}) took over the chat", "account-check-outline")
+        diagnosis.event(x["session_id"], f"{user['name']} ({user['title'] or 'Technical Expert'}) is looking into this", "account-check-outline")
     db.audit(user["name"], user["role"], "escalation.claimed", ticket, {}, x["site_code"])
     return escalation_detail(ticket, user)
 
