@@ -102,20 +102,20 @@ export function MediaButtons({ onFiles, onError, disabled, full = true, compact 
   );
 }
 
-// One Attach button: Take Photo · Record Video · Choose File in a small menu
-export function AttachMenu({ onFiles, disabled }) {
+// One Attach button: Take Photo · Record Video · Choose File in a small menu (block: a full-width button)
+export function AttachMenu({ onFiles, disabled, block = false, label = "Attach File" }) {
   const [open, setOpen] = useState(false);
   const pick = (e) => { setOpen(false); onFiles(Array.from(e.target.files || [])); e.target.value = ""; };
   const item = (icon, label, input) => (
     <label className="menu-item"><Icon name={icon} />{label}{input}</label>
   );
   return (
-    <div className="menu-wrap" onMouseLeave={() => setOpen(false)}>
-      <button type="button" className="btn ghost" disabled={disabled} aria-expanded={open} onClick={() => setOpen((x) => !x)}>
-        <Icon name="paperclip" />Attach File<Icon name={open ? "chevron-up" : "chevron-down"} size={16} />
+    <div className={`menu-wrap ${block ? "block" : ""}`} onMouseLeave={() => setOpen(false)}>
+      <button type="button" className={`btn ghost ${block ? "attach-block" : ""}`} disabled={disabled} aria-expanded={open} onClick={() => setOpen((x) => !x)}>
+        <Icon name={block ? "tray-arrow-up" : "paperclip"} />{label}{!block && <Icon name={open ? "chevron-up" : "chevron-down"} size={16} />}
       </button>
       {open && !disabled && (
-        <div className="menu left">
+        <div className={`menu left ${block ? "below" : ""}`}>
           {item("camera-outline", "Take Photo", <input type="file" hidden accept="image/*" capture="environment" onChange={pick} />)}
           {item("video-outline", "Record Video", <input type="file" hidden accept="video/*" capture="environment" onChange={pick} />)}
           {item("file-upload-outline", "Choose File", <input type="file" hidden multiple accept={FILE_TYPES} onChange={pick} />)}
@@ -140,6 +140,38 @@ export function VoiceNoteButton({ onFile, onError, disabled }) {
   return (
     <button type="button" className="send-btn" disabled={disabled} onClick={voice.start} aria-label="Record a voice note" title="Record a voice note">
       <Icon name="microphone" size={22} />
+    </button>
+  );
+}
+
+// A large "Record Voice Note" panel: a round mic, then the timer with Cancel and Stop while recording
+export function VoiceNotePanel({ onFile, onError, disabled, busy }) {
+  const voice = useVoiceNote(onFile, onError);
+  if (voice.recording) {
+    return (
+      <div className="voice-panel recording-on">
+        <div className="voice-timer"><span className="rec-dot" />Recording · {fmtSecs(voice.secs)}</div>
+        <div className="row" style={{ gap: 8 }}>
+          <button type="button" className="btn ghost" onClick={voice.cancel}>Cancel</button>
+          <button type="button" className="btn" onClick={voice.stop}><Icon name="stop" />Stop & Use</button>
+        </div>
+      </div>
+    );
+  }
+  if (busy) {
+    return (
+      <div className="voice-panel">
+        <Icon name="loading" className="spin" size={28} />
+        <div className="voice-title">Listening to your voice note…</div>
+        <div className="caption">It will appear in the description above.</div>
+      </div>
+    );
+  }
+  return (
+    <button type="button" className="voice-panel" disabled={disabled} onClick={voice.start}>
+      <span className="voice-mic"><Icon name="microphone" size={24} /></span>
+      <span className="voice-title">Record Voice Note</span>
+      <span className="caption">Speak in any language you're comfortable with</span>
     </button>
   );
 }

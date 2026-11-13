@@ -104,11 +104,8 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <button className="brand brand-btn" onClick={() => nav(home)} title="Home" aria-label="SiteBrain home">
-          <div className="brand-mark"><Icon name="hexagon-multiple" size={18} /></div>
-          <div>
-            <div className="brand-name">SiteBrain</div>
-            <div className="brand-sub">PLANT COPILOT</div>
-          </div>
+          <img className="brand-logo" src="/logo-wordmark.png" alt="SiteBrain" />
+          <img className="brand-logo-mark" src="/logo-mark.png" alt="SiteBrain" />
         </button>
         <nav className="nav">
           {items.map((v) => (

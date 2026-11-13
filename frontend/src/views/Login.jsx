@@ -35,13 +35,7 @@ export default function Login({ onDone }) {
   return (
     <div className="login">
       <aside className="login-brand">
-        <div className="brand">
-          <div className="brand-mark lg"><Icon name="hexagon-multiple" size={26} /></div>
-          <div>
-            <div className="brand-name" style={{ fontSize: 22, color: "#fff" }}>SiteBrain</div>
-            <div className="brand-sub" style={{ color: "#e3f2d4" }}>PLANT TROUBLESHOOTING COPILOT</div>
-          </div>
-        </div>
+        <div className="login-logo"><img src="/logo-wordmark.png" alt="SiteBrain" /></div>
         <div className="login-pitch">
           <div className="login-headline">Your plant troubleshooting copilot</div>
           <div className="login-feats">

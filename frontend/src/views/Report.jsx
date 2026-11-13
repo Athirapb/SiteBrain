@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { Icon, Spinner } from "../components/ui";
-import { AttachMenu, FileChips, VoiceNoteButton, filesForm, useFiles } from "../components/media";
+import { AttachMenu, FileChips, VoiceNotePanel, filesForm, useFiles } from "../components/media";
 
 export const SEV_TONE = { Low: "#868686", Medium: "#3191ef", High: "#ffa500", Critical: "#f5524a" };
 const LAST = "sb.lastReport"; // the place of the last report, the fallback prefill
@@ -140,7 +140,8 @@ export default function Report({ meta, user, equipment, nav, notify, refreshShar
       </section>
 
       <section className="card form-card">
-        <div className="form-card-head"><span className="form-step">2</span><div className="section-title">What is the issue?</div></div>
+        <div className="form-card-head"><span className="form-step">2</span><div className="section-title">What issue are you facing?</div></div>
+        <div className="form-intro">Tell us what's happening. You can type, record a voice note or share photos/videos to help us understand the issue.</div>
         {SHOW_SYMPTOMS_SEVERITY && <>
         <div className="field">
           <span className="overline">What do you notice</span>
@@ -168,32 +169,35 @@ export default function Report({ meta, user, equipment, nav, notify, refreshShar
         </div>
         </>}
         <div className="field">
-          <span className="overline">Describe it</span>
-          <div className="desc-input">
-            <textarea className="textarea" rows={3} value={description} onChange={(e) => setDescription(e.target.value)}
-                      aria-label="Describe the issue"
-                      placeholder="What, where and since when — e.g. grinding noise at the gearbox since the start of shift" />
-            <VoiceNoteButton onFile={(f) => addMedia([f])} onError={(m) => notify(m, true)} disabled={media.files.length >= 5} />
+          <label className="field-label" htmlFor="issue-desc">Describe the issue</label>
+          <div className="desc-box">
+            <textarea id="issue-desc" className="textarea" rows={3} value={description} onChange={(e) => setDescription(e.target.value)}
+                      placeholder="Type your issue here... Include what happened and where you noticed it." />
+            <span className="input-badge">Text input</span>
           </div>
         </div>
         <div className="field">
-          <span className="overline">Photos, videos or files · optional</span>
-          <div className="attach-row"><AttachMenu onFiles={addMedia} disabled={media.files.length >= 5} /></div>
-          {listening > 0 && <div className="caption"><Icon name="loading" className="spin" size={14} /> Listening to your voice note…</div>}
-          {meta.media && !listening && <div className="caption">A voice note is written into the description for you; photos and videos are looked at once you start.</div>}
-          <FileChips files={media.files} onRemove={media.remove} />
+          <div className="field-label"><Icon name="microphone-outline" size={18} className="label-icon" />Prefer speaking?</div>
+          <div className="form-hint">Record a voice note in your preferred language. We'll convert it into text for you.</div>
+          <VoiceNotePanel onFile={(f) => addMedia([f])} onError={(m) => notify(m, true)}
+                          disabled={media.files.length >= 5} busy={listening > 0} />
         </div>
-      </section>
-
-      <div className="row form-actions">
-        <span className="caption grow">{!projectId ? "Pick the project." : !areaId ? "Pick the area." : !eqId ? "Pick the equipment."
+        <hr className="form-divider" />
+        <div className="field">
+          <div className="field-label"><Icon name="paperclip" size={18} className="label-icon" />Add photos or videos <span className="optional">(Optional)</span></div>
+          <div className="form-hint">Have a photo or video showing the issue? Attach it here to help us understand better.</div>
+          <AttachMenu block label="Attach Photos / Videos / Files" onFiles={addMedia} disabled={media.files.length >= 5} />
+          <FileChips files={media.files} onRemove={media.remove} />
+          <div className="caption">You can skip this if you don't have any attachments.</div>
+        </div>
+        {!ready && <div className="caption form-status">{!projectId ? "Pick the project above." : !areaId ? "Pick the area above." : !eqId ? "Pick the equipment above."
           : media.tooBig.length ? "A file is over 10 MB." : listening ? "Listening to your voice note…"
-          : !ready ? (SHOW_SYMPTOMS_SEVERITY ? "Pick what you notice, describe it, or record a voice note."
-                                             : "Describe it or record a voice note.") : ""}</span>
-        <button className="btn lg" disabled={!ready || busy} onClick={submit}>
+          : !ready ? "Describe the issue or record a voice note to continue." : ""}</div>}
+        <button className="btn lg block start-btn" disabled={!ready || busy} onClick={submit}>
           {busy ? "Starting…" : "Start Troubleshooting"} <Icon name="arrow-right" />
         </button>
-      </div>
+      </section>
+
     </div>
   );
 }

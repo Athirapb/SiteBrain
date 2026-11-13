@@ -58,6 +58,10 @@ button, input, textarea, select { font-family: inherit; letter-spacing: 0.5px; }
 .brand-mark { width: 28px; height: 28px; border-radius: 6px; background: var(--gps-primary); display: flex; align-items: center; justify-content: center; color: #fff; flex: 0 0 28px; }
 .brand-name { font-size: 14px; font-weight: 700; color: var(--t90); line-height: 1.2; }
 .brand-sub { font-size: 10px; font-weight: 600; color: var(--gps-primary); letter-spacing: 1px; }
+.brand-logo { display: block; width: 100%; max-width: 180px; height: auto; }
+.brand-logo-mark { display: none; height: 34px; width: auto; }
+.login-logo { align-self: flex-start; background: var(--white); border-radius: 12px; padding: 12px 18px; position: relative; z-index: 1; }
+.login-logo img { display: block; height: 44px; width: auto; }
 .nav { display: flex; flex-direction: column; gap: 4px; }
 .nav-label { font-size: 12px; color: var(--t50); text-transform: uppercase; padding: 0 8px 4px; }
 .nav-btn { display: flex; align-items: center; gap: 8px; width: 100%; border: none; cursor: pointer; text-align: left; padding: 8px 12px; border-radius: var(--pill); font-size: 14px; background: transparent; color: var(--t60); }
@@ -393,6 +397,31 @@ code.secret { font-size: 18px; letter-spacing: 1px; color: var(--t90); user-sele
 .voice-inline { padding: 6px 8px 6px 12px; gap: 6px; flex: 0 0 auto; }
 .attach-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
+/* report form, step 2: type · speak · attach */
+.form-intro { font-size: 13px; color: var(--t60); margin-top: -6px; line-height: 1.45; }
+.field-label { display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; color: var(--t90); }
+.field-label .label-icon { color: var(--gps-green-dark); }
+.field-label .optional { font-weight: 600; color: var(--t90); }
+.form-hint { font-size: 13px; color: var(--t60); margin-top: -4px; line-height: 1.45; }
+.desc-box { position: relative; }
+.desc-box .textarea { width: 100%; display: block; resize: vertical; padding: 12px 14px 32px; font-size: 15px; font-family: inherit; line-height: 1.45; border-radius: 12px; }
+.input-badge { position: absolute; right: 10px; bottom: 10px; font-size: 11px; font-weight: 600; color: var(--gps-green-dark); background: var(--gps-primary-lgt); padding: 2px 8px; border-radius: var(--pill); pointer-events: none; }
+.voice-panel { width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 18px 16px; min-height: 112px; border: 1px solid var(--t10); border-radius: 12px; background: var(--white); font: inherit; color: var(--t80); text-align: center; }
+button.voice-panel { cursor: pointer; transition: border-color 150ms ease-out, background 150ms ease-out; }
+button.voice-panel:hover:not(:disabled) { border-color: var(--gps-primary); background: #f7fbf2; }
+button.voice-panel:disabled { opacity: 0.5; cursor: not-allowed; }
+.voice-mic { width: 44px; height: 44px; border-radius: 50%; background: var(--gps-green-dark); color: #fff; display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
+.voice-title { font-size: 15px; font-weight: 600; color: var(--t90); }
+.voice-panel.recording-on { gap: 12px; border-color: var(--gps-error); background: var(--gps-error-lgt); }
+.voice-timer { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--gps-red); font-variant-numeric: tabular-nums; }
+.form-divider { border: none; border-top: 1px solid var(--t10); margin: 4px 0; }
+.menu-wrap.block { width: 100%; }
+.btn.attach-block { width: 100%; justify-content: center; padding: 13px 16px; font-size: 15px; color: var(--t90); }
+.menu.below { top: calc(100% + 4px); }
+.btn.block { width: 100%; justify-content: center; }
+.btn.start-btn:disabled { opacity: 1; background: var(--gps-primary-lgt); color: var(--gps-green-dark); }
+.form-status { text-align: center; margin-bottom: -6px; }
+
 .msgs.wa { background-color: var(--wa-bg); background-image: radial-gradient(rgba(0,0,0,0.035) 1px, transparent 1px); background-size: 18px 18px; gap: 10px; }
 .msg.out { align-items: flex-end; }
 .msg.in { align-items: flex-start; }
@@ -472,6 +501,9 @@ code.secret { font-size: 18px; letter-spacing: 1px; color: var(--t90); user-sele
 @media (max-width: 860px) {
   .app { flex-direction: column; padding-bottom: 68px; }
   .sidebar { position: static; height: auto; flex: 0 0 auto; flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px; border-right: none; border-bottom: 1px solid var(--t10); }
+  .brand-logo { display: none; }
+  .brand-logo-mark { display: block; }
+  .login-logo img { height: 34px; }
   .side-foot { margin-top: 0; margin-left: auto; flex-direction: row; align-items: center; }
   .side-foot .profile, .side-foot .btn.ghost { display: none; }
   .signout { padding: 6px 12px; font-size: 12px; }
