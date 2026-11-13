@@ -16,7 +16,7 @@ sealed-for-life bearings, maximum differential pressure and temperature); CNG st
 plant incident history (incident_log_2026.csv, incident_log_gas_movers_hwg.csv), SOP-CMP-03, SOP-ROT-01 (LOTO)
 and OEM_HP_CBG_Compressor_Maintenance / OEM_Biogas_Blower_Maintenance in data/docs.
 """
-from .dsl import B, C, K, Q, R, W
+from .dsl import B, C, K, Q, R, W, VIB_ALARM_PREVENT, VIB_ALERT, VIB_LIMIT
 
 TREES = {}
 
@@ -49,7 +49,7 @@ TREES["Blower"] = {
                                "Record torque values on the job card"])),
                   B("Blower vibration above limit for weeks", R(
                       "Vibration trend not acted on until something breaks", "Method",
-                      prevent=["Set a vibration alarm at 4.5 mm/s with a defined response",
+                      prevent=[VIB_ALARM_PREVENT,
                                "Add flange bolt check to the monthly blower round"])),
               ])),
               B("Pipe strain on the blower flange", R(
@@ -100,7 +100,7 @@ TREES["Blower"] = {
                   prevent=["Re-slope the line (≥1%) to a drain point upstream of the blower"])),
               B("Sulphur from biological desulphurisation carried over", R(
                   "Air dosing for desulphurisation not controlled, elemental sulphur forms in the gas path", "Method",
-                  prevent=["Control air dosing to O2 target (typically < 0.5–1% in biogas)", "Inspect blower casing quarterly"])),
+                  prevent=["Control air dosing to the scrubber-outlet O2 target (0.3–0.5%, alarm at 1%); product CBG O2 ≤ 0.5%", "Inspect blower casing quarterly"])),
           ])),
         C("belt", "Drive belt slack or pulley misalignment (belt-driven units)", "Method", ["belt", "squeal", "slip"], [
             "Stop the blower and apply LOTO — never adjust a running belt",
@@ -196,14 +196,16 @@ TREES["Blower"] = {
                                       "sensor": 2.2}),
             ("Pulsing, rising whine as flow drops", {"backpr": 3.5, "cond": 1.6, "brg": 0.8, "belt": 0.7, "gasket": 0.6,
                                                      "heat": 0.9, "sensor": 0.6}),
-        ], ["sound", "noise", "vibration", "squeal"], {"tag": "vibration_mm_s", "option": 3, "above": 4.5},
+        ], ["sound", "noise", "vibration", "squeal"], {"tag": "vibration_mm_s", "option": 3, "above": VIB_ALERT},
           how="Listen from the walkway first, then at each bearing housing. Don't touch or lean over the coupling or "
               "belt guard while it runs.",
           purpose="Belts squeal, bearings growl, leaks hiss and a blower fighting back-pressure pulses — the sound "
                   "narrows it down fast."),
         Q("bearing", "Point an IR thermometer at the bearing housings. How hot are they?", [
             ("Below 70°C", {"brg": 0.3, "heat": 0.6, "backpr": 0.8}),
-            ("Above 70°C", {"brg": 3.0, "heat": 2.0, "backpr": 1.5, "gasket": 0.8, "belt": 1.1, "sensor": 0.6, "cond": 1.0}),
+            ("70–85°C", {"brg": 2.2, "heat": 2.0, "backpr": 1.5, "gasket": 0.9, "belt": 1.1, "sensor": 0.7, "cond": 1.0}),
+            ("Above 85°C", {"brg": 3.5, "heat": 1.8, "backpr": 1.3, "gasket": 0.8, "belt": 1.1, "sensor": 0.5, "cond": 1.0},
+             ["rotating_abnormal"]),
         ], ["bearing", "temperature", "hot"], {"tag": "bearing_temp_c", "option": 0, "above": 75},
           how="Aim the IR gun at the bare metal of each bearing housing from about 30 cm, away from the belt or "
               "coupling. Painted surfaces read a little low.",
@@ -233,7 +235,7 @@ TREES["Blower"] = {
             ("Direct drive — no belts", {"belt": 0.1}),
         ], ["belt", "squeal"],
           how="Only with the blower stopped, isolated and locked out (SOP-ROT-01): remove the belt guard, press each "
-              "belt mid-span (about 15 mm deflection is typical), look for shiny glazed sides and cracks, and lay a "
+              "belt mid-span (about 1.6 mm of deflection per 100 mm of span at the OEM test force, e.g. ≈ 16 mm on a 1 m span, or use a sonic tension meter), look for shiny glazed sides and cracks, and lay a "
               "straight edge across both pulley faces.",
           purpose="Slipping belts wear out fast, overheat and cut the blower's flow."),
         Q("lineup", "Walk the discharge line. Are the valves lined up as per the start-up sheet?", [
@@ -474,7 +476,7 @@ TREES["Compressor"] = {
         Q("knock", "With the compressor running, listen at the crankcase and the cylinders. What do you hear?", [
             ("Yes, rhythmic knock", _o({"oilleak": 3.2, "liquid": 1.5, "rings": 1.2, "valve": 0.9, "particle": 0.9,
                                         "gasket": 0.3, "cooling": 0.6, "sensor": 0.4})),
-            ("Clatter / fluttering at valve covers", _o({"valve": 3.2, "particle": 1.6, "oilleak": 0.6, "gasket": 0.3,
+            ("Clatter / fluttering at valve covers", _o({"valve": 3.2, "particle": 2.6, "oilleak": 0.6, "gasket": 0.3,
                                                          "liquid": 1.0, "rings": 0.8, "cooling": 0.7, "sensor": 0.4})),
             ("Hissing", _o({"gasket": 3.5, "rings": 1.4, "oilleak": 0.3, "valve": 0.7, "particle": 0.5, "liquid": 0.5,
                             "cooling": 0.6, "sensor": 0.6})),
@@ -483,7 +485,7 @@ TREES["Compressor"] = {
             ("Heavy thud or bang, worst just after start", _o({"liquid": 3.8, "oilleak": 1.0, "valve": 1.0,
                                                                "particle": 0.8, "gasket": 0.3, "rings": 0.7,
                                                                "cooling": 0.5, "sensor": 0.4})),
-        ], ["sound", "vibration", "noise", "knock"], {"tag": "vibration_mm_s", "option": 3, "above": 4.5},
+        ], ["sound", "vibration", "noise", "knock"], {"tag": "vibration_mm_s", "option": 3, "above": 4.5},  # recip frame: OEM value
           how="Stay on the walkway, out of the line of the flywheel and belt guard. Use a screwdriver or stethoscope "
               "on the crankcase, then on each valve cover. A knock once per turn from low down is a bearing; a "
               "clatter at the covers is a valve.",
@@ -520,7 +522,7 @@ TREES["Compressor"] = {
           purpose="Leaking gas is a fire and H2S hazard; the location also tells a gasket from worn packing."),
         Q("valvetemp", "Use the IR gun on the valve covers. Is one hotter than the others?", [
             ("Uniform temperature", _o({"valve": 0.25, "particle": 0.8, "cooling": 0.9}, 1.1)),
-            ("One valve hotter by >15°C", _o({"valve": 3.6, "particle": 1.8, "rings": 1.1}, 0.8)),
+            ("One valve hotter by >15°C", _o({"valve": 3.6, "particle": 2.8, "rings": 1.1}, 0.8)),
             ("All covers hotter than usual", _o({"cooling": 3.0, "rings": 1.5, "valve": 0.8}, 0.8)),
         ], ["valve", "temperature"],
           how="Aim the IR gun at each suction and discharge valve cover of the same stage, from about 30 cm. Compare "
@@ -594,10 +596,10 @@ MAINTENANCE = {
         "failure_modes": ["Flange gasket / shaft seal gas leak", "Bearing failure (sealed-for-life end of life, wrong grease)",
                           "Condensate and sulphur fouling of impeller", "Belt slip and pulley misalignment",
                           "Overheating against back-pressure or in a hot enclosure", "False trips from wet impulse lines"],
-        "operating_limits": [("Vibration (ISO 10816)", "< 4.5 mm/s"), ("Bearing housing temperature", "< 80 °C"),
+        "operating_limits": [("Vibration", VIB_LIMIT), ("Bearing housing temperature", "< 80 °C"),
                              ("Gas blower differential pressure", "≈ 80–250 mbar (OEM curve; max per nameplate)"),
                              ("Gas discharge temperature", "< 60–70 °C typical; OEM max"),
-                             ("Gas leak at joints", "0% LEL; alarm at 10% LEL / 10 ppm H2S")],
+                             ("Gas leak at joints", "0% LEL; alarm at 10% LEL / 10 ppm H2S (15 ppm STEL)")],
     },
     "Compressor": {
         "summary": "LP 1–4 are reciprocating raw-biogas compressors feeding the chiller and membranes; HP 1–3 compress "
@@ -624,7 +626,7 @@ MAINTENANCE = {
                              ("HP suction / discharge", "≈ 6 bar(g) / ≤ 250 bar(g)"),
                              ("Stage discharge temperature", "< 150 °C (OEM trip typically 160–170 °C)"),
                              ("Valve cover temperature spread", "< 15 °C between like valves"),
-                             ("Vibration", "< 4.5 mm/s (frame)")],
+                             ("Frame vibration", "Per OEM / ISO 10816-8 for reciprocating machines (higher than rotary limits); alert on a 25 % rise over the commissioning baseline")],
     },
 }
 
@@ -668,7 +670,7 @@ CONDITIONS = [
          ("Gas inlet H2S after scrubber", "< 50 ppm (target < 10 ppm)",
           "H2S corrodes valves, packing and oil; forms iron sulphide powder.",
           "Check scrubber media and O2 dosing; increase oil change frequency."),
-         ("Frame vibration", "< 4.5 mm/s (SCADA ≈ 2.2)",
+         ("Frame vibration", "Per OEM / ISO 10816-8; baseline here ≈ 2.2 mm/s — alert on a 25 % rise",
           "Rising vibration shows knock, looseness or valve problems.",
           "Listen for knock, check foundation bolts; stop at Critical (ROT-01)."),
          ("Gas at joints / packing vents", "0% LEL",

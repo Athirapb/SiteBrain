@@ -80,6 +80,22 @@ def last_replies(v):
     return next((m.get("replies") for m in reversed(v["messages"]) if m.get("replies")), None)
 
 
+# How a pump with a damaged seal answers every pump check: answer whatever is asked until SiteBrain names the cause
+SEAL_ANSWERS = ["From the seal or gland", "No flow at all", "Smooth hum", "Normal", "Well above the minimum",
+                "Level OK, oil clean", "Coupling fine, bolts tight", "Yes, reaches normal shut-off", "No change",
+                "Normal and steady"]
+
+
+def diagnose(c, sid, h, answers=SEAL_ANSWERS, limit=10):
+    v = c.get(f"/api/sessions/{sid}", headers=h).json()
+    for _ in range(limit):
+        if any(m["type"] == "finding" for m in v["messages"]) or v["phase"] != "diagnose":
+            return v
+        replies = last_replies(v) or []
+        v = say(c, sid, next((a for a in answers if a in replies), replies[0]), h)
+    return v
+
+
 def test_workbook_seeds_the_equipment_inventory():
     items = catalog.parse_checksheet(config.CHECKSHEET_XLSX)
     assert len(items) == 111
@@ -197,7 +213,7 @@ def test_equipment_report_troubleshoots_without_signoff_then_resolves(client):
     assert any(i["rule_id"] == "ROT-01" for i in v["interlocks"]), "interlocks are still recorded for the control room"
     assert v["messages"][0]["type"] == "report"
     assert last_replies(v), "the first field check is asked straight after the report"
-    for t in ["Intact, no play", "Above 85°C", "Dark with metal fines"]:
+    for t in ["Intact, no play", "Above 85°C", "Dark with metal fines", "Growl or grinding from the gearbox"]:
         v = say(client, sid, t, h)
     # fishbone narrowed to the direct cause → finding with immediate actions, then the 5-Why starts
     finding = next(m for m in v["messages"] if m["type"] == "finding")
@@ -233,8 +249,7 @@ def test_pump_seal_rca_reaches_a_systemic_root_cause(client):
     assert {b["category"] for b in v["fishbone"]} >= {"Machine", "Method", "Material"}
     q = next(m for m in reversed(v["messages"]) if m.get("replies"))
     assert q.get("purpose") and HOW in q["replies"] and CANT in q["replies"]
-    for t in ["From the seal or gland", "No flow at all"]:
-        v = say(client, sid, t, h)
+    v = diagnose(client, sid, h)
     assert next(m for m in v["messages"] if m["type"] == "finding")["direct_cause"] == "Mechanical seal face damage"
     for t in ["It ran dry — flush water was off or weak", "Flush valve left closed after maintenance"]:
         v = say(client, sid, t, h)
@@ -268,7 +283,8 @@ def test_technician_can_chat_anytime_and_reopen_when_fix_fails(client):
     assert side["side"] and side["text"] and last_replies(v) == pending and v["session"]["turns"] == 0
     v = say(client, sid, "The pump was overhauled last week by a contractor", h)  # extra information, noted
     assert v["messages"][-1]["side"] and last_replies(v) == pending
-    for t in ["From the seal or gland", "No flow at all", SKIP_WHY, AGREE]:
+    v = diagnose(client, sid, h)
+    for t in [SKIP_WHY, AGREE]:
         v = say(client, sid, t, h)
     v = say(client, sid, "Do I need a permit for this?", h)  # questions during the fix get answers too
     assert v["messages"][-1]["side"] and v["phase"] == "fix"
@@ -291,8 +307,7 @@ def test_technician_can_ask_how_skip_checks_and_give_own_why(client):
 
     v = report(client, h, equipment_id="GPS-BUU-04|D1|D1 RC Pump 2", symptoms=["leak"], severity="Low")
     sid = v["session"]["id"]
-    for t in ["From the seal or gland", "No flow at all"]:
-        v = say(client, sid, t, h)
+    v = diagnose(client, sid, h)
     v = say(client, sid, "The flush pump was switched off to save power during the night shift", h)
     v = say(client, sid, AGREE, h)
     sol = next(m for m in v["messages"] if m["type"] == "solution")
@@ -303,7 +318,8 @@ def test_skipping_the_why_why_still_gives_an_rca_summary(client):
     h = login(client, "operator1")
     v = report(client, h, equipment_id="GPS-BUU-04|D1|D1 Transfer Pump 1", symptoms=["leak"])
     sid = v["session"]["id"]
-    for t in ["From the seal or gland", "No flow at all", SKIP_WHY, AGREE]:
+    v = diagnose(client, sid, h)
+    for t in [SKIP_WHY, AGREE]:
         v = say(client, sid, t, h)
     sol = next(m for m in v["messages"] if m["type"] == "solution")
     assert v["session"]["identified"] == 1 and sol["root_cause"] == "Mechanical seal face damage" and not sol["why_chain"]
@@ -313,8 +329,8 @@ def test_disagreeing_with_the_root_cause_goes_back_to_troubleshooting(client):
     h = login(client, "operator1")
     v = report(client, h, equipment_id="GPS-BUU-04|D3|D3 Transfer Pump 1", symptoms=["leak"])
     sid = v["session"]["id"]
-    for t in ["From the seal or gland", "No flow at all", SKIP_WHY]:
-        v = say(client, sid, t, h)
+    v = diagnose(client, sid, h)
+    v = say(client, sid, SKIP_WHY, h)
     assert v["phase"] == "agree" and v["messages"][-1]["root_cause"] == "Mechanical seal face damage"
     v = say(client, sid, "What does seal face damage look like?", h)  # a question gets an answer, the ask stays
     assert v["phase"] == "agree" and v["messages"][-1]["side"]
@@ -323,6 +339,84 @@ def test_disagreeing_with_the_root_cause_goes_back_to_troubleshooting(client):
     assert not any(m["type"] == "solution" for m in v["messages"])
     assert "seal" in diagnosis_state(sid)["excluded"]
     assert v["messages"][-1]["type"] != "root_cause" or v["messages"][-1]["root_cause"] != "Mechanical seal face damage"
+
+
+def test_a_side_reply_repeats_only_the_question_still_open(client):
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|D3|D3 Transfer Pump 1", symptoms=["leak"])
+    sid = v["session"]["id"]
+    v = diagnose(client, sid, h)
+    v = say(client, sid, SKIP_WHY, h)
+    v = say(client, sid, "The gland was repacked last month", h)  # a remark while the root cause waits for an answer
+    assert v["phase"] == "agree" and last_replies(v) == [AGREE, DISAGREE], "the root cause question, not the last why"
+
+
+def test_stale_options_are_not_repeated_after_a_new_stage(client):
+    from app import diagnosis
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|D3|D3 Transfer Pump 1", symptoms=["leak"])
+    sid = v["session"]["id"]
+    diagnosis.add_msg(sid, "survey", text="Condition checks", questions=[])  # a newer stage replaces the open check
+    assert diagnosis._last_prompt(sid) is None
+
+
+def test_llm_repeating_a_check_in_other_words_gets_a_new_check(client, monkeypatch):
+    from app import diagnosis
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|BUU|Chiller Pump 1", symptoms=["noise"])
+    s = diagnosis.load_session(v["session"]["id"])
+    eq = diagnosis.session_eq(s)
+    s["state"]["llm_checks"] = [{"text": "With the pump isolated under LOTO, feel the motor and coupling housing. "
+                                          "How hot is it?", "results": ["Hot (above 70°C)", "Normal (70°C or below)"]}]
+    assert diagnosis._llm_repeats_check(s, eq, "Under LOTO, touch the motor bearing housing: how hot is it?",
+                                        ["Above 70°C", "Below 70°C"])
+    assert not diagnosis._llm_repeats_check(s, eq, "With the pump isolated under LOTO, look at the seal face: is it "
+                                                   "scored or chipped?", ["Seal face scored", "Seal face looks fine"])
+
+
+def test_all_normal_readings_end_in_no_fault_found_never_silence(client):
+    from app import diagnosis
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|BUU|Cooling Water Pump 2", description="pump sounds a bit different")
+    sid = v["session"]["id"]
+    for _ in range(15):  # every check reads healthy
+        if v["phase"] != "diagnose":
+            break
+        replies = last_replies(v)
+        healthy = [r for r in replies if diagnosis.is_normal_answer(r)]
+        v = say(client, sid, healthy[0] if healthy else replies[0], h)
+    assert v["phase"] == "nff" and not v["session"]["identified"]
+    assert not any(m["type"] in ("finding", "root_cause") for m in v["messages"]), "no listed cause is forced"
+    nff = next(m for m in v["messages"] if m.get("nff"))
+    assert nff["items"] and nff["safety"] and "outside my knowledge base" in nff["text"]
+    assert any(o["reason"] == diagnosis.UNIDENTIFIED for o in offers(v)), "an expert is offered"
+    assert last_replies(v) == [diagnosis.CLOSE_REPLY]
+    n = len(v["messages"])
+    v = say(client, sid, "It is still making the noise", h)
+    assert len(v["messages"]) == n + 2 and v["messages"][-1]["side"], "every message still gets an answer"
+
+
+def test_a_normal_reading_is_not_evidence_for_an_untested_cause():
+    from app.brain import TREES
+    from app.diagnosis import OTHER, initial_posterior, update_posterior
+    tree = TREES["Pump"]
+    post = initial_posterior(tree, "leak", [])
+    dp = next(q for q in tree["questions"] if q["id"] == "dp")
+    after = update_posterior(post, dp, [0])  # discharge pressure "Normal": says nothing about seal or bearing
+    assert after["seal"] / after["brg"] <= post["seal"] / post["brg"], "a normal pressure must not push towards the seal"
+    assert after["wear"] < post["wear"], "but it does rule out lost pumping head"
+    assert 0 < post[OTHER] < 0.15
+
+
+def test_knowledge_brain_lints_and_every_cause_is_diagnosable():
+    from app.brain import check
+    assert check.main([]) == 0
+
+
+def test_vibration_limits_come_from_one_setting():
+    from app.brain import TREES
+    noise = next(q for q in TREES["Pump"]["questions"] if q["id"] == "noise")
+    assert noise["contradiction"]["above"] == config.VIB_ALERT_MM_S == 2.8 and config.VIB_STOP_MM_S == 7.1
 
 
 def diagnosis_state(sid):
@@ -795,7 +889,8 @@ def test_resolved_sessions_teach_the_tree(client):
         v = report(client, h, equipment_id=f"GPS-BUU-04|D4|D4 RC Pump {1 + n % 2}" if n < 2 else "GPS-BUU-04|D4|D4 Transfer Pump 1",
                    symptoms=["leak"])
         sid = v["session"]["id"]
-        for t in ["From the seal or gland", "No flow at all", SKIP_WHY, AGREE]:
+        v = diagnose(client, sid, h)
+        for t in [SKIP_WHY, AGREE]:
             v = say(client, sid, t, h)
         assert client.post(f"/api/sessions/{sid}/resolve", headers=h).json()["session"]["status"] == "resolved"
     rep = client.get("/api/kb/learning?kind=Pump", headers=ex).json()["kinds"][0]

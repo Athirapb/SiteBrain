@@ -4,7 +4,7 @@ pumps (often progressive cavity), and clean-water pumps (cooling water, chiller,
 Sources: centrifugal / slurry pump OEM manuals (mechanical seal flushing, bearing lubrication), Hydraulic Institute
 NPSH guidance, plant incident history (incident_log_2026.csv) and SOP-ROT-01 (LOTO).
 """
-from .dsl import B, C, K, Q, R, W
+from .dsl import B, C, K, Q, R, W, VIB_ALARM_PREVENT, VIB_ALERT, VIB_LIMIT
 
 TREES = {}
 
@@ -121,10 +121,13 @@ TREES["Pump"] = {
                   prevent=["Add valve line-up to the start-up checklist", "Fit open/close position indicators"])),
           ])),
         C("mis", "Shaft misalignment or loose baseplate", "Method", ["vibration", "coupling", "sound"], [
-            "Stop the pump under LOTO",
-            "Replace the worn coupling element",
-            "Check for soft foot, re-torque the base bolts and laser-align pump to motor",
-            "Restart and trend vibration for one shift"],
+            "Stop the pump under LOTO (isolate at the MCC and try-start to prove it dead)",
+            "Check soft foot (< 0.05 mm under any foot) and re-torque the base bolts",
+            "Check pipe strain: dial on the coupling while loosening the flange bolts — less than 0.05 mm movement",
+            "Laser-align pump to motor: ≤ 0.05 mm offset and ≤ 0.05 mm per 100 mm angularity (at 1,500 rpm) and "
+            "record the result",
+            "Replace the coupling element if worn, and inspect bearings and seal for damage from the misalignment",
+            f"Restart and trend vibration for one shift — it should settle below {VIB_ALERT:g} mm/s"],
           why=W("Why is the pump out of alignment?", [
               B("Alignment not done properly after the last maintenance", R(
                   "No laser alignment in the reassembly procedure", "Method",
@@ -185,7 +188,7 @@ TREES["Pump"] = {
             ("Grinding or whine from the bearing end", {"seal": 0.7, "imp": 0.7, "brg": 3.2, "cav": 0.7, "mis": 1.3, "wear": 0.7, "elec": 0.9}),
             ("Shaking more than noise, felt at the base", {"mis": 3.2, "imp": 1.4, "brg": 1.0, "seal": 0.7, "cav": 0.7, "wear": 0.7, "elec": 0.8}),
             ("Electrical hum or buzz from the motor", {"elec": 3.5, "seal": 0.8, "imp": 0.7, "brg": 0.8, "cav": 0.7, "mis": 0.8, "wear": 0.8}),
-        ], ["vibration", "sound", "noise"], {"tag": "vibration_mm_s", "option": 0, "above": 4.5},
+        ], ["vibration", "sound", "noise"], {"tag": "vibration_mm_s", "option": 0, "above": VIB_ALERT},
           how="Listen at the casing and then at the bearing housing; a screwdriver held to the housing works as a stethoscope.",
           purpose="Each failure has its own sound: cavitation crackles, a ragged impeller thumps, a bad bearing grinds."),
         Q("dp", "What does the discharge pressure gauge read compared with normal?", [
@@ -264,8 +267,8 @@ MAINTENANCE = {
         ],
         "failure_modes": ["Seal failure from dry running or grit", "Impeller ragging by fibres", "Cavitation at low tank level",
                           "Bearing failure from lost lubrication", "Wet-end wear from abrasive solids", "Misalignment after maintenance"],
-        "operating_limits": [("Bearing housing temperature", "< 80 °C"), ("Vibration (ISO 10816, class II)", "< 4.5 mm/s"),
-                             ("Seal flush pressure", "≈ 1 bar above stuffing-box pressure"),
+        "operating_limits": [("Bearing housing temperature", "< 80 °C"), ("Vibration", VIB_LIMIT),
+                             ("Seal flush pressure", "1–2 bar above seal-chamber pressure"),
                              ("Discharge pressure, RC pump", "≈ 2.4 bar")],
     },
 }

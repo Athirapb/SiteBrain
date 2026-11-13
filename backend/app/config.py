@@ -65,6 +65,10 @@ EMBED_MIN_SIM = float(os.getenv("SITEBRAIN_EMBED_MIN_SIM", "0.6"))
 # Diagnostic loop policy (SRS §4.2)
 MAX_DIAGNOSTIC_TURNS = int(os.getenv("SITEBRAIN_MAX_TURNS", "5"))
 CONFIDENCE_THRESHOLD = float(os.getenv("SITEBRAIN_CONFIDENCE", "0.85"))
+# Vibration velocity limits (mm/s RMS) for rotary machines — ISO 10816 class II by default: up to the alert value is
+# acceptable for long-term running, between the two is the alert zone, above the stop value the machine is stopped.
+VIB_ALERT_MM_S = float(os.getenv("SITEBRAIN_VIB_ALERT", "2.8"))
+VIB_STOP_MM_S = float(os.getenv("SITEBRAIN_VIB_STOP", "7.1"))
 # Present-condition check: how many field checks are asked together, as one form, before the one-at-a-time
 # follow-ups (0 or 1 = ask one check at a time from the start)
 SURVEY_SIZE = int(os.getenv("SITEBRAIN_SURVEY", "0"))

@@ -171,6 +171,16 @@ def _entropy(p: dict) -> float:
     return -sum(v * math.log(v) for v in p.values() if v > 0)
 
 
+# The causes in the knowledge brain are not the whole world. OTHER is "something not in the knowledge base": it
+# starts with a small share, never confirms as a cause, and is neutral to every answer (each option equally likely),
+# so it grows as the listed causes are ruled out. When it gets large, or the checks run out, the chat ends with
+# "no fault found" instead of pushing the operator towards a listed cause that doesn't fit.
+OTHER = "__other__"
+OTHER_PRIOR = 0.10
+OTHER_LIMIT = 0.40      # P(OTHER) at which the listed causes no longer explain what the operator sees …
+OTHER_MIN_ANSWERS = 3   # … once at least this many checks have been answered
+
+
 def initial_posterior(tree: dict, hint: str, matched: list[dict]) -> dict:
     strong = {m["id"] for m in matched if m["sim"] >= 60}
     post = {}
@@ -181,16 +191,25 @@ def initial_posterior(tree: dict, hint: str, matched: list[dict]) -> dict:
         if c.get("case") in strong:
             w *= 1.3
         post[c["id"]] = w
+    post[OTHER] = sum(post.values()) * OTHER_PRIOR / (1 - OTHER_PRIOR)
     return _norm(post)
+
+
+def update_posterior(post: dict, q: dict, picked: list[int]) -> dict:
+    """Bayes' rule with the same observation model pick_question() plans with: P(answer | cause). Several options
+    picked together: the observation is any of them, so each cause is weighed by their mean probability."""
+    return _norm({c: p * sum(_answer_lik(q, i, c) for i in picked) / len(picked) for c, p in post.items()})
+
+
+def real_causes(post: dict) -> dict:
+    return {c: p for c, p in post.items() if c != OTHER}
 
 
 def _answer_dist(q: dict, post: dict) -> list[float]:
     probs = [0.0] * len(q["options"])
     for c, pc in post.items():
-        liks = [o["lik"].get(c, 1.0) for o in q["options"]]
-        t = sum(liks)
-        for i, l in enumerate(liks):
-            probs[i] += pc * l / t
+        for i in range(len(q["options"])):
+            probs[i] += pc * _answer_lik(q, i, c)
     return probs
 
 
@@ -202,7 +221,7 @@ def pick_question(tree: dict, post: dict, asked: list[str], hint: str) -> dict |
             continue
         exp_h = 0.0
         for i, pa in enumerate(_answer_dist(q, post)):
-            after = _norm({c: post[c] * q["options"][i]["lik"].get(c, 1.0) for c in post})
+            after = update_posterior(post, q, [i])
             exp_h += pa * _entropy(after)
         gain = h0 - exp_h
         if q["keys"] and any(k in hint for k in q["keys"]):
@@ -212,10 +231,48 @@ def pick_question(tree: dict, post: dict, asked: list[str], hint: str) -> dict |
     return best
 
 
+# Answers that describe a healthy reading. In the field most checks read normal, whatever the fault: the baseline
+# answer distribution gives these options NORMAL_SHARE of the probability, the rest is shared by the other options.
+NORMAL_SHARE = 0.5
+_NORMAL_START = re.compile(
+    r"^(normal|ok\b|fine(?! black| but)|good|clean|intact|smooth|stable|nothing|none\b|clear|tight|correct|"
+    r"steady(?! climb| stream)|within (design|life|schedule|the normal)|no (change|dust|lockouts|unusual|work)|"
+    r"dry(,|$)|tube matches|both agree|all (open|normal)|as usual|level ok|flow good|flowing normally|belts? |"
+    r"coupling fine|sharp|fresh|moves smoothly|yes, reaches|recently|0% lel|centred|quiet|even|same\b|at setpoint|"
+    r"uniform|a little, as usual|slight weep|moving evenly|below 70|both below|< ?10 ppm|2–5°c|above 95|agrees within|"
+    r"level 60|reads correctly|they agree|starts and runs normally|cycles normally|it does not trip|in service|"
+    r"just the usual|usual -|firm dry cake|full, even spray|brush intact|oil level ok|one running, normal|"
+    r"louvres open|inlet below 40|supply cold|o2 3–6|δt normal|yes — pot empty|yes, flows freely|yes, flushed|"
+    r"no, same|100% perimeter|well above the minimum|closed and locked)", re.I)
+
+
+def is_normal_answer(label: str) -> bool:
+    """An answer that describes a healthy reading (most field checks read like this, whatever the fault)."""
+    return bool(_NORMAL_START.match(label.strip()))
+
+
+def baseline(q: dict) -> list[float]:
+    """P(answer) when the check says nothing about the fault: healthy readings are the common ones."""
+    if "_p0" not in q:
+        normal = [is_normal_answer(o["label"]) for o in q["options"]]
+        n_ok, n = sum(normal), len(normal)
+        if 0 < n_ok < n:
+            q["_p0"] = [NORMAL_SHARE / n_ok if ok else (1 - NORMAL_SHARE) / (n - n_ok) for ok in normal]
+        else:
+            q["_p0"] = [1.0 / n] * n
+    return q["_p0"]
+
+
 def _answer_lik(q: dict, i: int, c: str) -> float:
-    """P(the operator sees option i | cause c), the observation model pick_question() uses."""
-    liks = [o["lik"].get(c, 1.0) for o in q["options"]]
-    return liks[i] / (sum(liks) or 1.0)
+    """P(the operator sees option i | cause c). The authored multipliers say how much more (> 1) or less (< 1) likely
+    each answer is under cause c than usual: P(i | c) ∝ baseline(i) × multiplier(i, c), normalised over the options.
+    OTHER (a fault outside the knowledge base) follows the baseline. The one observation model for both choosing
+    checks and updating the causes."""
+    p0 = baseline(q)
+    if c == OTHER:
+        return p0[i]
+    w = [p * o["lik"].get(c, 1.0) for p, o in zip(p0, q["options"])]
+    return w[i] / (sum(w) or 1.0)
 
 
 def _set_entropy(qs: list[dict], post: dict) -> float:
@@ -410,6 +467,9 @@ def _join(items: list[str]) -> str:
 def _reasoning(s: dict, tree: dict, before: dict, after: dict) -> str:
     """Say what the last answer told us: what it ruled out and where it points."""
     lab = {c["id"]: c["label"].lower() for c in tree["causes"]}
+    after = {c: p for c, p in real_causes(after).items() if c in lab}
+    if not after:
+        return _vary(s, ["Thanks.", "Got it.", "Okay, that helps.", "Good, noted.", "Right."], "ack")
     top = max(after, key=after.get)
     down = [c for c in after if before.get(c, 0) > 0.08 and after[c] / before[c] < 0.45 and c != top]
     parts = [_vary(s, ["Thanks.", "Got it.", "Okay, that helps.", "Good, noted.", "Right."], "ack")]
@@ -450,8 +510,7 @@ def _skip_or_explain(s: dict, tree: dict, pending: dict, text: str, who: str, ex
                                                      "That's fine, we'll work around it.",
                                                      "Okay, skip that one."], "skip"))
         else:
-            st["pending"] = None
-            st["unidentified"] = True
+            _out_of_checks(s, tree, who, expert, lead="Okay.")
         return True
     return False
 
@@ -657,7 +716,7 @@ def answer_survey(sid: str, user: dict, answers: dict[str, list[str]], skipped: 
         picked = sorted({labels[a] for a in answers.get(q["id"], []) if a in labels})
         if picked:
             opts = [q["options"][i] for i in picked]
-            post = _norm({c: post[c] * sum(o["lik"].get(c, 1.0) for o in opts) / len(opts) for c in post})
+            post = update_posterior(post, q, picked)
             opt_flags = sorted({f for o in opts for f in o["flags"]})
             flags.update(opt_flags)
             st["answers"].append({"qid": q["id"], "question": q["text"], "answer": "; ".join(o["label"] for o in opts),
@@ -698,12 +757,14 @@ def answer_survey(sid: str, user: dict, answers: dict[str, list[str]], skipped: 
     lead = _reasoning(s, tree, before, post) or "Thanks, that's a good picture."
     if s["confidence"] >= config.CONFIDENCE_THRESHOLD:
         _confirm_cause(s, area, eq, tree, "SiteBrain", lead=lead)
+    elif _outside_knowledge(st):
+        _no_fault_found(s, tree, "SiteBrain", False, lead=lead)
     else:
         nxt = pick_question(tree, post, st["asked"], report_hint(s["report"]))
         if nxt:
             _ask(s, nxt, lead=f"{lead} To narrow it down further:")
         else:
-            st["unidentified"] = True
+            _out_of_checks(s, tree, "SiteBrain", False, lead=lead)
     save_session(s)
     _post_turn_checks(s)
     return load_session(sid)
@@ -886,6 +947,12 @@ def send(sid: str, text: str, user: dict, choices: list[str] | None = None, file
     if phase in ("fix", "verify"):
         return _fix_turn(s, text, user)
 
+    if phase == "nff":
+        _side_turn(s, text, after="To go further, escalate to an expert with the button above, or close it as "
+                                  "no fault found if it's running normally.")
+        save_session(s)
+        return load_session(sid)
+
     rejected = False
     if phase == "agree":
         if text == AGREE or (text != DISAGREE and _AGREE_TEXT.match(text) and not _is_question(text)):
@@ -942,9 +1009,19 @@ def _is_question(text: str) -> bool:
     return t.endswith("?") or bool(_QUESTION.match(t))
 
 
+# Messages that open a new stage: a question asked before one of them is no longer waiting for an answer
+_STAGE_BREAKS = {"analysis", "survey", "finding", "solution", "escalation"}
+
+
 def _last_prompt(sid: str) -> dict | None:
-    """The question or step the field operator still owes an answer to (the latest message offering replies)."""
-    return next((m for m in reversed(messages(sid)) if m["type"] == "agent" and m.get("replies")), None)
+    """The question or step the field operator still owes an answer to: the latest message offering replies, as long
+    as no newer stage (condition checks, a finding, the solution) has replaced it."""
+    for m in reversed(messages(sid)):
+        if m["type"] in ("agent", "root_cause") and m.get("replies"):
+            return m
+        if m["type"] in _STAGE_BREAKS:
+            return None
+    return None
 
 
 def _side_system(s: dict, area: dict, eq: dict | None, prompt: dict | None) -> str:
@@ -1102,6 +1179,8 @@ def _side_turn(s: dict, text: str, after: str = "") -> None:
     if not _is_question(text):
         s["state"].setdefault("notes", []).append({"text": text, "at": db.now_iso()})
     answer = _side_answer(s, area, eq, text, prompt)
+    if after and after.lower().rstrip(".") in answer.lower():
+        after = ""
     add_msg(s["id"], "agent", who=who, expert=expert, side=True, text=f"{answer} {after}".strip(),
             prompt=(prompt.get("prompt") or prompt.get("text")) if prompt else None, how=prompt.get("how") if prompt else None,
             fix_step=prompt.get("fix_step") if prompt else None, fix_total=prompt.get("fix_total") if prompt else None,
@@ -1237,8 +1316,7 @@ def _rules_bot_turn(s: dict, area: dict, eq: dict, text: str, choices: list[str]
             save_session(s)
             return
         opts = [pending["options"][i] for i in picked]
-        # several options picked: the observation is any of them, so weigh each cause by their mean likelihood
-        post = _norm({c: post[c] * sum(o["lik"].get(c, 1.0) for o in opts) / len(opts) for c in post})
+        post = update_posterior(post, pending, picked)
         opt_flags = sorted({f for o in opts for f in o["flags"]})
         flags.update(opt_flags)
         st["answers"].append({"qid": pending["id"], "question": pending["text"],
@@ -1279,13 +1357,95 @@ def _rules_bot_turn(s: dict, area: dict, eq: dict, text: str, choices: list[str]
         _confirm_cause(s, area, eq, tree, "SiteBrain", lead=lead)
         save_session(s)
         return
-    nxt = pick_question(tree, post, st["asked"], hint)
     st["pending"] = None
+    nxt = None if _outside_knowledge(st) else pick_question(tree, post, st["asked"], hint)
     if nxt:
         _ask(s, nxt, lead=lead + " " + _vary(s, ["Next:", "Now,", "One more thing:", "Next check:"], "next"))
+    elif _outside_knowledge(st):
+        _no_fault_found(s, tree, "SiteBrain", False, lead=lead)
     else:
-        st["unidentified"] = True
+        _out_of_checks(s, tree, "SiteBrain", False, lead=lead)
     save_session(s)
+
+
+UNIDENTIFIED = "Observations do not match any known cause in the knowledge base"
+_STOP_LIMITS = (f"If it is still running and gets worse — vibration above {config.VIB_STOP_MM_S:g} mm/s, a bearing "
+                "above 85 °C, a new leak, smell or noise — stop it and make it safe.")
+
+
+BEST_FIT_MIN, BEST_FIT_LEAD, BEST_FIT_OTHER = 0.60, 3.0, 0.20
+
+
+def clear_leader(post: dict, excluded: list[str] | None = None) -> str | None:
+    """When the checks run out: the cause that is clearly the best fit (well ahead of the runner-up, and the
+    knowledge base explains what was seen), else None."""
+    real = sorted(((p, c) for c, p in real_causes(post).items() if c not in (excluded or [])), reverse=True)
+    if not real or post.get(OTHER, 0) >= BEST_FIT_OTHER:
+        return None
+    second = real[1][0] if len(real) > 1 else 0.0
+    return real[0][1] if real[0][0] >= BEST_FIT_MIN and real[0][0] >= BEST_FIT_LEAD * second else None
+
+
+def _out_of_checks(s: dict, tree: dict, who: str = "SiteBrain", expert: bool = False, lead: str = "") -> None:
+    """No check left to ask: propose the clear best fit (the operator still agrees with the root cause before any
+    fix), else say plainly that no listed cause fits."""
+    st = s["state"]
+    if clear_leader(st["posterior"], st.get("excluded")):
+        area, eq = load_area(s["area_id"]), session_eq(s)
+        _confirm_cause(s, area, eq, tree, who, expert,
+                       lead=f"{lead} That's all the checks I have, and one cause is clearly the best fit.".strip())
+    else:
+        _no_fault_found(s, tree, who, expert, lead=lead)
+
+
+def _outside_knowledge(st: dict) -> bool:
+    """The listed causes no longer explain what the operator sees."""
+    return len(st.get("answers", [])) >= OTHER_MIN_ANSWERS and st["posterior"].get(OTHER, 0) >= OTHER_LIMIT
+
+
+def _evidence(tree: dict, st: dict, cid: str) -> tuple[list[str], list[str]]:
+    """The answered checks that speak for and against one cause (vs. a neutral answer)."""
+    pro, con = [], []
+    for a in st.get("answers", []):
+        q = next((x for x in tree["questions"] if x["id"] == a.get("qid")), None)
+        if not q:
+            continue
+        said = {x.strip().lower() for x in a["answer"].split(";")}
+        idx = [i for i, o in enumerate(q["options"]) if o["label"].lower() in said]
+        if not idx:
+            continue
+        r = sum(_answer_lik(q, i, cid) for i in idx) / (sum(_answer_lik(q, i, OTHER) for i in idx) or 1.0)
+        (pro if r >= 1.5 else con if r <= 0.67 else []).append(a["answer"])
+    return pro, con
+
+
+def _no_fault_found(s: dict, tree: dict, who: str = "SiteBrain", expert: bool = False, lead: str = "") -> None:
+    """The checks ran out, or none of the listed causes fits: say so plainly, show what is still suspected and on
+    what evidence, give the run/stop limits, offer an expert and closing as no fault found. Never go silent."""
+    st = s["state"]
+    st.update(pending=None, phase="nff", unidentified=True)
+    other = round(st["posterior"].get(OTHER, 0) * 100)
+    items = []
+    for c in s["causes"][:3]:
+        pro, con = _evidence(tree, st, c["id"])
+        line = f"{c['label']} — {round(c['likelihood'] * 100)}%"
+        if pro:
+            line += f" · fits: {'; '.join(pro[:2])}"
+        if con:
+            line += f" · against: {'; '.join(con[:2])}"
+        items.append(line)
+    n = len(st.get("answers", []))
+    add_msg(s["id"], "agent", who=who, expert=expert, items=items, nff=True,
+            prompt="Escalate, or close as no fault found?",
+            text=(f"I've gone through {n} check{'s' if n != 1 else ''} and none of the causes I know fits well "
+                  f"enough — about {other}% points to something outside my knowledge base. These are still possible:"),
+            safety=_STOP_LIMITS)
+    add_msg(s["id"], "agent", who=who, expert=expert,
+            text="Next step is a closer look than field checks can give — a vibration spectrum, a strip-down "
+                 "inspection, a lab sample or the OEM. I recommend sending this to an expert with the checks done so "
+                 "far. If the equipment is running normally now, you can close it as no fault found.",
+            replies=[CLOSE_REPLY])
+    suggest_escalation(s, UNIDENTIFIED)
 
 
 # ---------------------------------------------------------------------------
@@ -1484,7 +1644,7 @@ def _post_turn_checks(s: dict) -> None:
         reason = (f"{config.MAX_DIAGNOSTIC_TURNS} diagnostic checks without root-cause confidence above "
                   f"{int(config.CONFIDENCE_THRESHOLD * 100)}%")
     elif st.get("unidentified"):
-        reason = "Observations do not match any known cause in the knowledge base"
+        reason = UNIDENTIFIED
     if reason:
         suggest_escalation(s, reason)
         save_session(s)
@@ -1643,6 +1803,34 @@ _ACTION_REPLY = re.compile(r"^(inspect|check|measure|listen|verify|look|test|ope
                            r"unclog|reset|calibrate|contact|call|escalate|consider|try)\b", re.I)
 
 
+# words every safe check shares; they don't tell two checks apart
+_CHECK_FILLER = {"with", "the", "under", "loto", "isolated", "isolate", "stopped", "running", "safely", "what", "you",
+                 "see", "look", "check", "report", "and", "for", "its", "are", "this", "that", "from"}
+
+
+def _check_words(text: str) -> set[str]:
+    return {w for w in knowledge.tokenize(re.sub(r"\d+", " ", text or "")) if len(w) > 2 and w not in _CHECK_FILLER}
+
+
+def _llm_repeats_check(s: dict, eq: dict, instruction: str, results: list[str]) -> bool:
+    """True when the LLM's new check is one already asked: same answers as an asked decision-tree check, or mostly
+    the same words and answers as one of its own earlier checks (e.g. "Hot / Normal" then "Above 70°C / Below 70°C"
+    for the same temperature)."""
+    st = s["state"]
+    said = {r.lower() for r in results}
+    for q in tree_for(eq["kind"])["questions"]:
+        if q["id"] in st.get("asked", []) and len(said & {o["label"].lower() for o in q["options"]}) >= 2:
+            return True
+    new_q, new_r = _check_words(instruction), _check_words(" ".join(results))
+    for old in st.get("llm_checks", []):
+        old_q, old_r = _check_words(old["text"]), _check_words(" ".join(old["results"]))
+        q_sim = len(new_q & old_q) / (len(new_q | old_q) or 1)
+        r_sim = len(new_r & old_r) / (len(new_r | old_r) or 1)
+        if q_sim >= 0.5 or (q_sim >= 0.3 and r_sim >= 0.3):
+            return True
+    return False
+
+
 def _llm_check(s: dict, area: dict, eq: dict, data: dict) -> None:
     """Direct the field operator to the LLM's next fishbone check, with its possible results as answers. When the
     model offers actions as answers or gives no instruction, ask the decision tree's next check instead."""
@@ -1650,6 +1838,8 @@ def _llm_check(s: dict, area: dict, eq: dict, data: dict) -> None:
     reply = (data.get("reply") or "").strip()
     instruction = (data.get("instruction") or "").strip()
     results = [r.strip() for r in data.get("quick_replies") or [] if r.strip() and r.strip() != CANT]
+    if instruction and results and _llm_repeats_check(s, eq, instruction, results):
+        instruction, results = "", []  # asked before in other words: the decision tree picks a new check instead
     if instruction and results and not any(_ACTION_REPLY.match(r) for r in results):
         # the same check as a decision-tree one (the LLM is shown them with their answers): record it as asked, so a
         # decision-tree turn during an LLM outage reads the answer against it and never asks it again
@@ -1659,6 +1849,7 @@ def _llm_check(s: dict, area: dict, eq: dict, data: dict) -> None:
         st["pending"] = same["id"] if same else None
         if same and same["id"] not in st["asked"]:
             st["asked"].append(same["id"])
+        st.setdefault("llm_checks", []).append({"text": instruction, "results": results[:4]})
         add_msg(s["id"], "agent", who="SiteBrain", text=f"{reply} {instruction}".strip(), prompt=instruction,
                 purpose=data.get("purpose"), how=data.get("how"), multi=True,
                 replies=results[:4] + ([HOW] if data.get("how") else []) + [CANT])
@@ -1694,6 +1885,8 @@ def _llm_bot_turn(s: dict, area: dict, eq: dict, text: str | None) -> bool:
     if flags - before:
         _apply_safety(s, area, eq)
     stage = data.get("stage") or ("done" if data.get("identified") else "fishbone")
+    if stage == "why" and not data.get("direct_cause") and not st.get("rca"):
+        stage = "fishbone"  # asking why before naming what failed: keep checking instead
     rules = _rules_for(s, area, eq)
     if stage in ("why", "done") and data.get("direct_cause") and not st.get("rca"):
         cat = data.get("fishbone_category") or "Machine"
@@ -1727,6 +1920,11 @@ def _llm_bot_turn(s: dict, area: dict, eq: dict, text: str | None) -> bool:
                     prompt="Why did that happen?", why_step=len(st["rca"]["chain"]) + 1, replies=[NOT_SURE, SKIP_WHY])
     else:
         replies = data.get("quick_replies") or []
+        if stage == "why":  # answers to a why are reasons; never a check's results the model has already offered
+            seen = {r.lower() for m in messages(s["id"]) if m["type"] == "agent" and not m.get("why_step")
+                    for r in m.get("replies") or []}
+            replies = [r for r in replies if r.lower() not in seen and not _ACTION_REPLY.match(r)]
+            replies = [r for r in replies if r not in (NOT_SURE, SKIP_WHY)][:4] + [NOT_SURE, SKIP_WHY]
         add_msg(s["id"], "agent", who="SiteBrain", text=data.get("reply") or "Tell me what you see.", replies=replies,
                 why_step=(len(data.get("why_chain") or []) + 1) if stage == "why" else None)
         if stage == "why" and st.get("rca") and data.get("why_chain"):

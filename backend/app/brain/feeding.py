@@ -13,7 +13,7 @@ maintenance), anaerobic-digestion feeding guidance (TS %, particle size, C:N, mi
 history (incident_log_2026.csv, incident_log_agitation_feeding.csv), OEM_Feed_Shredder_and_Conveyor_Maintenance.md
 and SOP-ROT-01 (LOTO).
 """
-from .dsl import B, C, K, Q, R, W
+from .dsl import B, C, K, Q, R, W, VIB_ALERT, VIB_LIMIT
 
 TREES = {}
 
@@ -247,7 +247,7 @@ TREES["Shredder"] = {
             ("Bang or loud clunk, then stop", _s(0.7, foreign=4.0)),
             ("Grinding or whine from the gearbox", _s(0.7, drive=4.0)),
             ("Squeal from the conveyor", _s(0.8, conv=3.0)),
-        ], ["sound", "noise", "knock", "vibration", "bang"], {"tag": "vibration_mm_s", "option": 0, "above": 4.5},
+        ], ["sound", "noise", "knock", "vibration", "bang"], {"tag": "vibration_mm_s", "option": 0, "above": VIB_ALERT},
           how="Listen from the walkway at the cutting chamber, then at the gearbox and bearings. Ear defenders on — "
               "shredders are loud.",
           purpose="A bang means a foreign object, a grind means the drive, a squeal means the belt."),
@@ -493,7 +493,7 @@ TREES["Machine"] = {
             ("Squeal from the belt", _m(0.7, belt=4.0)),
             ("Knock or rattle, frame shaking", _m(0.7, mis=4.0, brg=1.2)),
             ("Motor buzz, no turning", _m(0.7, elec=4.0)),
-        ], ["sound", "noise", "vibration", "knock"], {"tag": "vibration_mm_s", "option": 0, "above": 4.5},
+        ], ["sound", "noise", "vibration", "knock"], {"tag": "vibration_mm_s", "option": 0, "above": VIB_ALERT},
           how="Listen at the motor, belt / coupling and bearings in turn, from outside the guards.",
           purpose="Each fault sounds different: bearings growl, belts squeal, loose mounts rattle."),
         Q("temp", "Put the IR gun on the bearings and gearbox. What's the hottest reading?", [
@@ -540,7 +540,7 @@ MAINTENANCE = {
         "operating_limits": [("Feed rate", "≤ rated t/h on the nameplate"), ("Cut length", "≈ 20–40 mm"),
                              ("Motor current", "≤ nameplate FLA; swings < ±15 %"),
                              ("Bearing / gearbox temperature", "< 80 °C"),
-                             ("Vibration", "< 4.5 mm/s")],
+                             ("Vibration", VIB_LIMIT)],
     },
     "Machine": {
         "summary": "Bagging and briquetting machines pack or densify separated digestate solids (fermented organic "
@@ -557,7 +557,7 @@ MAINTENANCE = {
         "failure_modes": ["Low or contaminated lubrication", "Worn / slack belts and chains", "Material jams from wet solids",
                           "Screw and die wear from grit", "Bearing failure", "Misalignment / loose mounting",
                           "Weigher out of calibration", "Motor / control faults"],
-        "operating_limits": [("Bearing temperature", "< 80 °C"), ("Vibration", "< 4.5 mm/s"),
+        "operating_limits": [("Bearing temperature", "< 80 °C"), ("Vibration", VIB_LIMIT),
                              ("Gearbox oil level", "60–80 % of sight glass"),
                              ("Solids moisture for briquetting", "≈ 8–15 % (dryer needed above)"),
                              ("Bag weight tolerance", "± 0.5 % of nominal")],

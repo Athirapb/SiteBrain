@@ -13,7 +13,8 @@ supplier data (iron-sponge basics, SulfaTreat-type media: sulfur loading, moistu
 regeneration, 2–3 % air dosing effects), compressed-air / gas filtration element OEM manuals (dP change-out limits,
 coalescer drains), refrigeration-dryer service guides (condenser fouling, drain traps, refrigerant charge, icing),
 Bureau of Indian Standards IS 16087:2016 (CBG: CH4 ≥ 90 %, CO2 ≤ 4 % for cylinder filling, CO2+N2+O2 ≤ 10 %,
-H2S ≤ 30.3 mg/m³, moisture ≤ 16 mg/m³), PNGRB CBG injection guidance, published RCA papers, plant incident
+O2 ≤ 0.5 %, total sulphur incl. H2S ≤ 20 mg/m³, moisture ≤ 5 mg/m³ — TO VERIFY against a licensed copy of the
+standard; earlier versions of this file had H2S ≤ 30.3 mg/m³ and moisture ≤ 16 mg/m³), PNGRB CBG injection guidance, published RCA papers, plant incident
 history (incident_log_gas_cleaning.csv) and SOP-SCR-02 / SOP-CHL-01 / SOP-BUU-01.
 The plant runs a tighter internal product target of CH4 > 95 % (interlock MEM-01).
 """
@@ -129,7 +130,7 @@ TREES["Scrubber"] = {
           ["oxygen", "o2", "air dosing", "hot"], [
             "Reset air dosing to the setpoint that gives 0.3–0.5% O2 at the scrubber outlet",
             "If the shell has a hot spot: stop air dosing, keep gas flowing, monitor shell temperature; never open the vessel hot",
-            "Check outlet O2 stays below 1% (membrane and CBG O2 limit)",
+            "Check outlet O2 is back at 0.3–0.5% (alarm at 1%); product CBG O2 must stay ≤ 0.5% (IS 16087)",
             "Record the dosing setpoint and outlet O2 in the shift log"],
           why=W("Why was the air dosing wrong?", [
               B("Operator changed the rotameter setting", W("Why was it changed?", [
@@ -180,7 +181,7 @@ TREES["Scrubber"] = {
             ("Mesh fine but caked crust underneath",
              {"mesh": 0.4, "choke": 3.5, "exhaust": 0.8, "load": 0.9, "air": 1.4, "meas": 0.6}),
         ], ["mesh", "seal gap", "channel", "differential"],
-          how="Only under a confined-space / vessel-entry permit: depressurise, purge with N2 to < 10% LEL and O2 > 19.5%, "
+          how="Only under a confined-space / vessel-entry permit: depressurise, purge with N2 to < 10% LEL, then ventilate with air until the manway reads O2 19.5–23.5%, LEL < 1% and H2S < 10 ppm, "
               "wear an H2S personal monitor, keep a standby attendant. Look from the manway — do not enter for this check. "
               "Keep exposed media damp: spent iron media can heat up and smoulder in air.",
           purpose="A gap at the mesh edge lets gas run down the wall and skip the media — that's channeling."),
@@ -926,7 +927,7 @@ MAINTENANCE = {
                           "Recycle valve malfunction", "Low feed pressure / pressure ratio",
                           "Feed temperature outside window", "Analyser drift", "High methane slip in off-gas"],
         "operating_limits": [("Product CH4", "> 95% plant target (IS 16087 ≥ 90%)"),
-                             ("Product CO2", "≤ 4% for cylinder filling"),
+                             ("Product CO2", "≤ 4% for cylinder filling"), ("Product O2", "≤ 0.5% (IS 16087); CO2+N2+O2 ≤ 10%"),
                              ("Feed pressure", "≈ 12–15 bar g"), ("Feed temperature", "≈ 20–40 °C, ≥ 10 °C above dew point"),
                              ("Permeate dP", "≈ 0.9 bar (alarm > 30% above baseline)"),
                              ("Methane slip in off-gas", "< 1% of CH4 in feed")],
@@ -948,7 +949,7 @@ CONDITIONS = [
              "Above 1%: cut air dosing, check for air ingress at digester / gas holder"),
             ("Scrubber bed dP", "0.04–0.06 bar", "Rising = caking; sudden drop = channeling",
              "Above 0.10 bar: de-choke per SOP-SCR-02. Below 0.02 bar: lock filter bypass (SCR-01), inspect mesh"),
-            ("Scrubber outlet H2S", "< 10 ppm", "H2S corrodes compressors and is limited in CBG (30.3 mg/m³)",
+            ("Scrubber outlet H2S", "< 10 ppm", "H2S corrodes compressors and is limited in CBG (≤ 20 mg/m³ total sulphur, IS 16087 — verify)",
              "Above 30 ppm: breakthrough — switch vessel, tube-check, change media (SCR-02 advisory)"),
             ("Filter element dP", "0.05–0.10 bar", "Tells how loaded the elements are",
              "At 0.20 bar change elements; sudden drop after a rise means rupture — trip LP load line (CMP-01)"),
@@ -968,7 +969,7 @@ CONDITIONS = [
              "More than 30% above baseline: check guard bed and compressor oil carry-over"),
             ("Product CH4 purity", "> 95% (IS 16087 ≥ 90%)", "Product spec for CBG cascade / pipeline",
              "Below 95%: MEM-01 diverts to flare / recycle; run the Membrane tree"),
-            ("Product CO2 / moisture / H2S", "CO2 ≤ 4%, moisture ≤ 16 mg/m³, H2S ≤ 30.3 mg/m³", "IS 16087 CBG limits",
+            ("Product CO2 / O2 / moisture / H2S", "CO2 ≤ 4%, O2 ≤ 0.5%, moisture ≤ 5 mg/m³, total sulphur ≤ 20 mg/m³", "IS 16087 CBG limits (verify against the standard)",
              "Out of spec: divert product, find the failing stage (scrubber, chiller, membrane)"),
             ("Methane slip (off-gas CH4)", "< 1% of feed CH4", "Lost product and greenhouse emissions",
              "Above 1%: check recycle valve, stage pressure ratio and module integrity"),

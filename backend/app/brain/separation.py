@@ -9,7 +9,7 @@ on coarse / fine solids separation (feed 3-8 % TS, polymer 4-10 kg/t DS, capture
 dewatering guidance (polymer make-up and ageing, centrate TSS), reliability / RCA articles on decanter failure modes,
 plant incident history (incident_log_separation.csv) and SOP-ROT-01 (LOTO) / SOP-SLS-01 (polymer dosing).
 """
-from .dsl import B, C, K, Q, R, W
+from .dsl import B, C, K, Q, R, W, VIB_LIMIT
 
 TREES = {}
 
@@ -646,7 +646,7 @@ MAINTENANCE = {
                           "Poor flocculation - wet cake and dirty centrate",
                           "Plugging / high-torque trips from wrong differential or feed surges",
                           "Feed zone and discharge port erosion"],
-        "operating_limits": [("Vibration (ISO 10816-3)", "< 4.5 mm/s normal; alarm ≈ 7 mm/s; trip per OEM (≈ 11 mm/s)"),
+        "operating_limits": [("Vibration (decanter, flexibly mounted — ISO 10816-3)", "< 4.5 mm/s normal; alarm ≈ 7.1 mm/s; trip per OEM (≈ 11 mm/s)"),
                              ("Main bearing temperature", "< 75 °C normal; alarm 85 °C; stop above 90 °C"),
                              ("Scroll torque", "50-70 % of maximum in steady operation"),
                              ("Differential speed", "≈ 2-15 rpm for digestate (per OEM recipe)"),
@@ -676,7 +676,7 @@ MAINTENANCE = {
                              ("Feed flow", "≤ nameplate rating per separator (reduce for thick feed)"),
                              ("Cake dry matter", "≈ 25-35 % DM"),
                              ("Motor current", "≤ nameplate FLA; ≈ 18 A typical here"),
-                             ("Vibration", "< 4.5 mm/s")],
+                             ("Vibration", VIB_LIMIT)],
     },
 }
 
@@ -714,7 +714,7 @@ CONDITIONS = [
          ("Scroll torque", "50-70 % of maximum, steady",
           "Creeping torque at constant feed signals scroll wear; spikes signal plugging",
           "Reduce feed; check differential; plan scroll inspection if creeping"),
-         ("Decanter vibration", "< 4.5 mm/s (alarm ≈ 7 mm/s)",
+         ("Decanter vibration", "< 4.5 mm/s (flexibly mounted; alarm ≈ 7.1 mm/s)",
           "Rising vibration means imbalance or bearing damage",
           "Follow the decanter troubleshooting tree; stop at Critical and let the bowl run down fully"),
          ("Main bearing temperature", "< 75 °C (alarm 85 °C)",

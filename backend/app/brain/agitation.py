@@ -11,7 +11,7 @@ mud: crusting, sediment build-up, uneven mixing), anaerobic-digestion process li
 guidance on FOS/TAC, VFA, pH, OLR, HRT and foaming, plant incident history (incident_log_2026.csv,
 incident_log_agitation_feeding.csv), OEM_Agitator_Gearbox_Maintenance.md, SOP-DIG-01 and SOP-ROT-01 (LOTO).
 """
-from .dsl import B, C, K, Q, R, W
+from .dsl import B, C, K, Q, R, W, VIB_ALARM_PREVENT, VIB_ALERT, VIB_LIMIT
 
 TREES = {}
 
@@ -58,7 +58,7 @@ TREES["Agitator"] = {
               B("No early warning — vibration trend not watched", R(
                   "Vibration and bearing temperature are not trended, so wear is found only at failure", "Measurement",
                   prevent=["Monthly handheld vibration route on every agitator gearbox; alarm on a 50 % rise",
-                           "Set SCADA alerts at 70 °C bearing temperature and 4.5 mm/s vibration"])),
+                           "Set SCADA alerts at 70 °C bearing temperature", VIB_ALARM_PREVENT])),
           ], how="Look at the old bearing: brown varnish or rust means lubrication / water; one-sided wear tracks mean "
                  "misalignment or overload; flaking all round means it reached its fatigue life."),
           case="KB-0412"),
@@ -290,7 +290,7 @@ TREES["Agitator"] = {
             ("Rhythmic knock once per turn", _rest(0.7, rag=3.0, mis=1.5, sed=1.3, brg=1.0)),
             ("Clunk from the coupling at start", _rest(0.8, mis=3.0)),
             ("Electrical buzz from the motor", _rest(0.7, elec=3.5)),
-        ], ["vibration", "sound", "noise", "knock"], {"tag": "vibration_mm_s", "option": 0, "above": 4.5},
+        ], ["vibration", "sound", "noise", "knock"], {"tag": "vibration_mm_s", "option": 0, "above": VIB_ALERT},
           how="Listen at the motor, the coupling guard and the gearbox in turn. A long screwdriver held on the gearbox "
               "housing works as a stethoscope. Stay outside the guard.",
           purpose="Each fault has its own sound: a bearing growls, a ragged impeller knocks once per turn, a "
@@ -359,7 +359,7 @@ MAINTENANCE = {
                           "Overload from crust, sediment or high-TS contents", "Water-contaminated or low gearbox oil",
                           "False vibration alarm from a loose sensor", "Motor / VFD electrical faults"],
         "operating_limits": [("Gearbox output bearing temperature", "55–70 °C normal; 70–85 °C alert; > 85 °C trip"),
-                             ("Vibration (ISO 10816, class II)", "< 4.5 mm/s; stop and inspect > 7.1 mm/s"),
+                             ("Vibration", VIB_LIMIT),
                              ("Gearbox oil level", "Mid sight glass (60–80 %)"),
                              ("Gland weep", "10–20 drops/min"),
                              ("Coupling alignment", "≤ 0.05 mm offset, ≤ 0.05 mm/100 mm angularity"),

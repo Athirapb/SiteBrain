@@ -4,6 +4,7 @@ Structure: ids, 6M categories, likelihood keys, hazard flags, SCADA contradictio
 Diagnosability: for every direct cause, simulate a technician whose answers match that cause (the option with the
 strongest evidence for it) and check SiteBrain confirms it within the turn limit without confirming a wrong cause.
 """
+import re
 import sys
 
 from .. import config, safety, telemetry
@@ -90,28 +91,56 @@ def check_structure(kind: str, tree: dict) -> list[str]:
 
 def simulate(tree: dict, cause: dict, hinted: bool = True) -> tuple[bool, int, str]:
     """(confirmed correctly, turns used, what happened)."""
-    from ..diagnosis import _norm, initial_posterior, pick_question
+    from ..diagnosis import _answer_lik, clear_leader, initial_posterior, pick_question, real_causes, update_posterior
 
     hint = " ".join(cause["keys"]) if hinted else ""
     post = initial_posterior(tree, hint, [])
     asked: list[str] = []
     ids = [c["id"] for c in tree["causes"]]
-    for turn in range(1, config.MAX_DIAGNOSTIC_TURNS + 1):
+    turn = 0
+    while True:
         q = pick_question(tree, post, asked, hint)
-        if not q:
-            return False, turn - 1, "ran out of questions"
+        if not q:  # the engine's end of checks: the clear best fit, else "no fault found"
+            best = clear_leader(post)
+            if best:
+                return best == cause["id"], turn, f"best fit {best} at {real_causes(post)[best]:.0%} after all checks"
+            real = real_causes(post)
+            top = max(real, key=real.get)
+            return False, turn, f"no clear cause after all checks (best {top} at {real[top]:.0%})"
+        turn += 1
 
-        def strength(o):
-            others = [o["lik"].get(x, 1.0) for x in ids if x != cause["id"]]
-            return o["lik"].get(cause["id"], 1.0) / (sum(others) / len(others))
-        opt = max(q["options"], key=strength)
-        post = _norm({c: post[c] * opt["lik"].get(c, 1.0) for c in post})
+        def strength(i):  # the answer this cause is most likely to show, compared with the other causes
+            others = [_answer_lik(q, i, x) for x in ids if x != cause["id"]]
+            return _answer_lik(q, i, cause["id"]) / (sum(others) / len(others))
+        post = update_posterior(post, q, [max(range(len(q["options"])), key=strength)])
         asked.append(q["id"])
-        top = max(post, key=post.get)
-        if post[top] >= config.CONFIDENCE_THRESHOLD:
-            return top == cause["id"], turn, f"confirmed {top} at {post[top]:.0%}"
-    top = max(post, key=post.get)
-    return False, config.MAX_DIAGNOSTIC_TURNS, f"best {top} at {post[top]:.0%} after {config.MAX_DIAGNOSTIC_TURNS} turns"
+        real = real_causes(post)
+        top = max(real, key=real.get)
+        if real[top] >= config.CONFIDENCE_THRESHOLD:
+            return top == cause["id"], turn, f"confirmed {top} at {real[top]:.0%}"
+
+
+def check_normal_options(tree: dict) -> list[str]:
+    """A "normal" reading must not count as evidence for a cause the check doesn't test: among the causes the
+    check says nothing about (no option above 1.5), P(normal | cause) should be about the same."""
+    from ..diagnosis import _answer_lik, is_normal_answer
+
+    warn = []
+    ids = [c["id"] for c in tree["causes"]]
+    for q in tree["questions"]:
+        untested = [c for c in ids if max(o["lik"].get(c, 1.0) for o in q["options"]) < 1.5]
+        if len(untested) < 2:
+            continue
+        for i, o in enumerate(q["options"]):
+            if not is_normal_answer(o["label"]):
+                continue
+            ps = {c: _answer_lik(q, i, c) for c in untested}
+            mid = sorted(ps.values())[len(ps) // 2]
+            for c, p in ps.items():
+                if p > mid * 1.2:
+                    warn.append(f"question {q['id']}: {o['label']!r} favours untested cause {c} "
+                                f"({p:.2f} vs {mid:.2f} typical)")
+    return warn
 
 
 def main(kinds: list[str]) -> int:
@@ -122,6 +151,7 @@ def main(kinds: list[str]) -> int:
             print(f"{kind}: legacy tree (not yet in the brain) — skipped")
             continue
         errs = check_structure(kind, tree)
+        warns = check_normal_options(tree)
         sims = [(c["id"], *simulate(tree, c)) for c in tree["causes"]]
         bad = [s for s in sims if not s[1]]
         failures += len(errs) + len(bad)
@@ -130,6 +160,8 @@ def main(kinds: list[str]) -> int:
               f"{'OK' if not errs and not bad else 'FAIL'}")
         for e in errs:
             print(f"   ✗ {e}")
+        for w in warns:
+            print(f"   ⚠ {w}")
         for cid, ok, turns, what in sims:
             print(f"   {'✓' if ok else '✗'} {cid:<10} {turns} turn(s): {what}")
     print(f"\n{len(CASES)} RCA cases · {len(CONDITIONS)} operating-condition profiles · "

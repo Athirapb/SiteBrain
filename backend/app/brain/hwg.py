@@ -10,7 +10,7 @@ exchangers → falling ion current and flame-failure lockouts; annual or more fr
 guidance (tension by deflection, matched sets, laser alignment, run-in re-tension), plant incident history
 (incident_log_gas_movers_hwg.csv), SOP-HWG-01 and SOP-ROT-01 (LOTO) in data/docs.
 """
-from .dsl import B, C, K, Q, R, W
+from .dsl import B, C, K, Q, R, W, VIB_ALERT, VIB_LIMIT, VIB_STOP
 
 TREES = {}
 
@@ -205,7 +205,7 @@ TREES["HWG"] = {
                                                       "belt": 0.4, "fanbrg": 0.5, "scanner": 0.7, "circ": 0.6})),
             ("No unusual sound", _o({"belt": 0.3, "fanbrg": 0.3, "scanner": 1.6, "circ": 1.6, "deposits": 1.3,
                                      "lowgas": 1.0, "airfuel": 0.8, "air": 0.8})),
-        ], ["sound", "noise", "belt", "squeal", "vibration"], {"tag": "vibration_mm_s", "option": 3, "above": 4.5},
+        ], ["sound", "noise", "belt", "squeal", "vibration"], {"tag": "vibration_mm_s", "option": 3, "above": VIB_ALERT},
           how="Listen from the walkway, first at the ID fan and its belt guard, then at the burner front. Don't open "
               "the belt guard while the fan runs.",
           purpose="Belts squeal, bearings growl and a badly tuned or starved burner rumbles."),
@@ -214,7 +214,7 @@ TREES["HWG"] = {
             ("Glazed, cracked or slack belts / pulleys offset", _o({"belt": 4.5, "fanbrg": 1.3}, 0.8), ["belt_wear"]),
         ], ["belt", "squeal"],
           how="Only with the ID fan stopped, isolated and locked out (SOP-ROT-01, BELT-01): remove the guard, press each "
-              "belt mid-span (about 15 mm deflection is typical), look for shiny glazed sides and cracks, and lay a "
+              "belt mid-span (about 1.6 mm of deflection per 100 mm of span at the OEM test force, e.g. ≈ 16 mm on a 1 m span, or use a sonic tension meter), look for shiny glazed sides and cracks, and lay a "
               "straight edge across both pulley faces.",
           purpose="Slipping belts starve the burner of draught and wear the fan bearings."),
         Q("brgtemp", "Point an IR thermometer at the ID fan bearing housings. How hot are they?", [
@@ -321,8 +321,8 @@ MAINTENANCE = {
                              ("Gas pressure at burner train inlet", "≈ 20–50 mbar (burner data plate)"),
                              ("Flue gas O2", "≈ 3–6%"), ("Flue gas CO", "< 100 ppm"),
                              ("Flue gas temperature", "≈ 160–220 °C (rising = fouling)"),
-                             ("ID fan vibration", "< 4.5 mm/s"), ("ID fan bearing temperature", "< 80 °C"),
-                             ("Belt deflection", "≈ 15 mm per metre of span (OEM)")],
+                             ("ID fan vibration", VIB_LIMIT), ("ID fan bearing temperature", "< 80 °C"),
+                             ("Belt deflection", "≈ 1.6 mm per 100 mm of span at the OEM test force (sonic meter preferred); re-tension after 4 h and 24 h")],
     },
 }
 
@@ -356,7 +356,7 @@ CONDITIONS = [
          ("Flame signal (ionisation / scanner)", "Above burner manual minimum, stable",
           "A falling signal predicts flame-failure lockouts (silica on the probe).",
           "Clean probe / scanner; check position and earth."),
-         ("ID fan vibration", "< 4.5 mm/s (SCADA ≈ 2.2)",
+         (f"ID fan vibration", f"< {VIB_ALERT:g} mm/s (SCADA ≈ 2.2); stop above {VIB_STOP:g} mm/s",
           "Rising vibration means belt, bearing or impeller problems.",
           "Inspect belts and bearings under LOTO; stop at Critical."),
          ("ID fan bearing temperature", "< 80 °C (SCADA ≈ 62)",

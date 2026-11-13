@@ -18,6 +18,15 @@ Likelihoods: 1.0 = the answer says nothing about that cause; >1 makes it more li
 <1 makes it less likely (0.2–0.4 = nearly rules it out).
 """
 
+from .. import config
+
+# Vibration limits for rotary machines (pumps, agitators, blowers, fans, shredders, screws): site-configurable
+VIB_ALERT, VIB_STOP = config.VIB_ALERT_MM_S, config.VIB_STOP_MM_S
+VIB_LIMIT = (f"< {VIB_ALERT:g} mm/s acceptable; {VIB_ALERT:g}–{VIB_STOP:g} mm/s alert; stop above {VIB_STOP:g} mm/s "
+             "(ISO 10816 class II); also alert on a 25 % rise over the machine's own baseline")
+VIB_ALARM_PREVENT = (f"Set vibration alarms at {VIB_ALERT:g} mm/s (alert) and {VIB_STOP:g} mm/s (stop), plus a 25 % rise "
+                     "over the baseline, each with a defined response")
+
 CATEGORIES = ["Man", "Machine", "Method", "Material", "Measurement", "Environment"]
 CATEGORY_LABEL = {"Man": "People", "Machine": "Machine", "Method": "Method", "Material": "Material",
                   "Measurement": "Measurement", "Environment": "Environment"}
