@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { Empty, Icon, Modal, Spinner, useAsync } from "../components/ui";
+import SearchSelect from "../components/SearchSelect";
 
 export default function Setup({ meta, nav, notify, refreshShared }) {
   const areas = useAsync(() => api.get("/api/areas?include_inactive=true"), []);
@@ -181,15 +182,15 @@ function EquipmentModal({ eq, areas, kinds, onClose, onSave }) {
     <Modal title={eq.id ? `Edit equipment · ${eq.name}` : "Add equipment"} onClose={onClose} width={520}>
       <Field label="Name"><input className="input" value={f.name} placeholder="e.g. D5 Agitator 1" onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
       <Field label="Type">
-        <select className="select" value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}>
+        <SearchSelect className="select" value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}>
           {kinds.map((k) => <option key={k}>{k}</option>)}
-        </select>
+        </SearchSelect>
       </Field>
       <div className="caption">The type decides which field checks and causes SiteBrain uses when troubleshooting.</div>
       <Field label="Area">
-        <select className="select" value={f.area_id} onChange={(e) => setF({ ...f, area_id: Number(e.target.value) })}>
+        <SearchSelect className="select" value={f.area_id} onChange={(e) => setF({ ...f, area_id: Number(e.target.value) })}>
           {areas.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.code})</option>)}
-        </select>
+        </SearchSelect>
       </Field>
       <Field label="Tag · optional"><input className="input" value={f.tag || ""} placeholder="e.g. P-101" onChange={(e) => setF({ ...f, tag: e.target.value })} /></Field>
       <label className="check-row"><input type="checkbox" checked={f.active} onChange={(e) => setF({ ...f, active: e.target.checked })} /><span>Active — available when reporting issues</span></label>

@@ -250,6 +250,21 @@ export default function Issue({ user, params, nav, notify, refreshShared }) {
           </div>
         )}
 
+        {!isExpert && sv.cases.length > 0 && (
+          <div className="similar-anchor">
+          {similar ? (
+            <div className="similar-panel" role="dialog" aria-label="Similar past cases">
+              <div className="row"><div className="card-title grow">Similar Past Cases</div>
+                <button className="btn ghost round sm" onClick={() => setSimilar(false)} aria-label="Close"><Icon name="close" /></button></div>
+              <SimilarCases cases={sv.cases} />
+            </div>
+          ) : (
+            <button className="similar-fab" onClick={() => setSimilar(true)}>
+              <Icon name="book-search-outline" size={18} />Similar Past Cases<span className="fab-count">{sv.cases.length}</span>
+            </button>
+          )}
+          </div>
+        )}
         <div className="msgs wa" ref={scrollRef}>
           {sv.messages.map((m, i) => (
             <Message key={m.id + "-" + i} m={m} sid={sid} busy={busy} mode={s.mode} isExpert={isExpert}
@@ -306,19 +321,6 @@ export default function Issue({ user, params, nav, notify, refreshShared }) {
         )}
         {dragging && <div className="drop-hint"><Icon name="tray-arrow-down" size={28} />Drop files to attach them</div>}
 
-        {!isExpert && sv.cases.length > 0 && (
-          similar ? (
-            <div className="similar-panel" role="dialog" aria-label="Similar past cases">
-              <div className="row"><div className="card-title grow">Similar Past Cases</div>
-                <button className="btn ghost round sm" onClick={() => setSimilar(false)} aria-label="Close"><Icon name="close" /></button></div>
-              <SimilarCases cases={sv.cases} />
-            </div>
-          ) : (
-            <button className="similar-fab" onClick={() => setSimilar(true)}>
-              <Icon name="book-search-outline" size={18} />Similar Past Cases<span className="fab-count">{sv.cases.length}</span>
-            </button>
-          )
-        )}
       </section>
 
       {isExpert && <IssueSummary sv={sv} onLiveData={() => setLiveData(true)} />}

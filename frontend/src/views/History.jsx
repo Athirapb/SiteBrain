@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { api } from "../api";
 import { Empty, Icon, Modal, PillTabs, Spinner, URGENCY_BG, fmtDate, fmtDuration, fmtTime, useAsync } from "../components/ui";
+import SearchSelect from "../components/SearchSelect";
 
 // status filter → which cases it keeps, and how a case's outcome reads
 const STATUS_TABS = [["All", "All"], ["open", "Open"], ["SiteBrain", "Solved In The App"], ["Expert", "Solved By An Expert"], ["closed", "Closed"]];
@@ -83,22 +84,22 @@ export default function History({ user, nav, embedded }) {
         </div>
         <label className="hist-select">
           <Icon name="briefcase-outline" />
-          <select className="select" value={project} aria-label="Project filter"
+          <SearchSelect className="select" value={project} aria-label="Project filter"
                   onChange={(e) => { setProject(e.target.value); setEq("All"); }}>
             <option value="All">All projects</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}{p.code && p.code !== p.name ? ` (${p.code})` : ""} · {p.n}</option>)}
-          </select>
+          </SearchSelect>
         </label>
         <label className="hist-select">
           <Icon name="cog-outline" />
-          <select className="select" value={eq} aria-label="Equipment filter" onChange={(e) => setEq(e.target.value)}>
+          <SearchSelect className="select" value={eq} aria-label="Equipment filter" onChange={(e) => setEq(e.target.value)}>
             <option value="All">All equipment</option>
             {equipmentByArea.map(([area, items]) => (
               <optgroup key={area} label={area}>
                 {items.map((e) => <option key={e.id} value={`${area}|||${e.id}`}>{e.name} · {e.n}</option>)}
               </optgroup>
             ))}
-          </select>
+          </SearchSelect>
         </label>
         {filtered && <button className="btn ghost sm" onClick={clear}><Icon name="filter-remove-outline" />Clear Filters</button>}
       </div>

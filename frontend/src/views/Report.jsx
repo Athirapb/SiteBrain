@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { Icon, Spinner } from "../components/ui";
 import { AttachMenu, FileChips, VoiceNotePanel, filesForm, useFiles } from "../components/media";
+import SearchSelect from "../components/SearchSelect";
 
 export const SEV_TONE = { Low: "#868686", Medium: "#3191ef", High: "#ffa500", Critical: "#f5524a" };
 const LAST = "sb.lastReport"; // the place of the last report, the fallback prefill
@@ -111,24 +112,24 @@ export default function Report({ meta, user, equipment, nav, notify, refreshShar
           {prefilled && <span className="caption" style={{ marginLeft: "auto" }}><Icon name="auto-fix" size={14} /> Filled in from your profile</span>}</div>
         <label className="field">
           <span className="overline">Project</span>
-          <select className="select lg" value={projectId} onChange={(e) => setProjectId(e.target.value ? Number(e.target.value) : "")}>
+          <SearchSelect className="select lg" value={projectId} onChange={(e) => setProjectId(e.target.value ? Number(e.target.value) : "")}>
             <option value="">Select the project…</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}{p.name !== p.code ? ` (${p.code})` : ""}</option>)}
-          </select>
+          </SearchSelect>
         </label>
         <label className="field">
           <span className="overline">Area</span>
-          <select className="select lg" value={areaId} onChange={(e) => { setAreaId(e.target.value ? Number(e.target.value) : ""); setEqId(""); }}>
+          <SearchSelect className="select lg" value={areaId} onChange={(e) => { setAreaId(e.target.value ? Number(e.target.value) : ""); setEqId(""); }}>
             <option value="">Select the area…</option>
             {areas.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.code})</option>)}
-          </select>
+          </SearchSelect>
         </label>
         <label className="field">
           <span className="overline">Equipment</span>
-          <select className="select lg" value={eqId} disabled={!areaId} onChange={(e) => setEqId(e.target.value)}>
+          <SearchSelect className="select lg" value={eqId} disabled={!areaId} onChange={(e) => setEqId(e.target.value)}>
             <option value="">{areaId ? "Select the equipment…" : "Pick the area first…"}</option>
             {areaEq.map((e) => <option key={e.id} value={e.id}>{e.name} · {e.kind}{e.tag ? ` · ${e.tag}` : ""}</option>)}
-          </select>
+          </SearchSelect>
         </label>
         {chosen?.open_session_id && (
           <div className="safety" style={{ alignItems: "center" }}>

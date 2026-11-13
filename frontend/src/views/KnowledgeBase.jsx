@@ -3,6 +3,7 @@ import { api } from "../api";
 import { Empty, Icon, Modal, PillTabs, Spinner, fmtDate, useAsync, usePoll } from "../components/ui";
 import History from "./History";
 import { CAT_COLOR, CAT_LABEL, CatChip, Fishbone, WhyChain } from "../components/rca";
+import SearchSelect from "../components/SearchSelect";
 
 const KINDS = ["Agitator", "Pump", "Compressor", "Blower", "Decanter", "WAM", "Shredder", "HWG", "Chiller", "Scrubber", "Filter", "Membrane", "Machine"];
 
@@ -243,10 +244,10 @@ function Cases({ canWrite, notify }) {
           <Icon name="magnify" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search symptom, equipment, root cause or case ID" aria-label="Search cases" />
         </div>
-        <select className="select pill" value={project} onChange={(e) => setProject(e.target.value)} aria-label="Project">
+        <SearchSelect className="select pill" value={project} onChange={(e) => setProject(e.target.value)} aria-label="Project">
           <option value="">All Projects</option>
           {(cases.data?.projects || []).map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
+        </SearchSelect>
         <button className={`btn sm ${filters ? "" : "ghost"}`} onClick={() => setFilters((x) => !x)}>
           <Icon name="filter-variant" />Filters{kind !== "All" || source !== "all" ? " · on" : ""}
         </button>
@@ -354,9 +355,9 @@ function AddCase({ onClose, onSaved, notify }) {
   };
   return (
     <Modal title="Add verified case (model calibration)" onClose={onClose} width={560}>
-      <select className="select" value={f.kinds[0]} onChange={(e) => setF({ ...f, kinds: [e.target.value] })} aria-label="Equipment type">
+      <SearchSelect className="select" value={f.kinds[0]} onChange={(e) => setF({ ...f, kinds: [e.target.value] })} aria-label="Equipment type">
         {KINDS.map((k) => <option key={k}>{k}</option>)}
-      </select>
+      </SearchSelect>
       <input className="input" placeholder="Symptom / abnormality" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
       <input className="input" placeholder="Root cause" value={f.cause} onChange={(e) => setF({ ...f, cause: e.target.value })} />
       <textarea className="textarea" rows={3} placeholder="Verified resolution" value={f.fix} onChange={(e) => setF({ ...f, fix: e.target.value })} />
@@ -465,13 +466,13 @@ function Docs({ canWrite, notify }) {
             <>
               <input type="file" accept=".pdf,.docx,.txt,.md,.csv,.xlsx" onChange={(e) => setFile(e.target.files[0] || null)} aria-label="Document file" />
               <input className="input" placeholder="Title (optional)" value={title} onChange={(e) => setTitle(e.target.value)} />
-              <select className="select" value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Document type">
+              <SearchSelect className="select" value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Document type">
                 <option value="manual">OEM manual</option><option value="sop">SOP</option><option value="log">Incident / shift log</option>
-              </select>
-              <select className="select" value={eqKind} onChange={(e) => setEqKind(e.target.value)} aria-label="Equipment type">
+              </SearchSelect>
+              <SearchSelect className="select" value={eqKind} onChange={(e) => setEqKind(e.target.value)} aria-label="Equipment type">
                 <option value="">Equipment: detect from content</option>
                 {KINDS.filter((k) => k !== "Machine").map((k) => <option key={k} value={k}>{k}</option>)}
-              </select>
+              </SearchSelect>
               <button className="btn" disabled={!file || uploading} onClick={upload}>
                 {uploading ? <><Icon name="loading" className="spin" />Indexing…</> : <><Icon name="upload" />Upload & Index</>}
               </button>

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { api } from "../api";
 import { Empty, Icon, Modal, PillTabs, Spinner, fmtDate, useAsync } from "../components/ui";
+import SearchSelect from "../components/SearchSelect";
 
 const ROLE_TABS = [["all", "All"], ["field_operator", "Field Operators"], ["expert", "Experts"]];
 
@@ -131,22 +132,22 @@ function UserModal({ user, opts, notify, onClose, onSaved }) {
         <input className="input" list="titles" value={f.title} onChange={set("title")} placeholder={role?.titles[0]} />
         <datalist id="titles">{role?.titles.map((t) => <option key={t} value={t} />)}</datalist></label>
       <label className="field"><span className="overline">Plant{needsSite ? "" : " · leave empty for all plants"}</span>
-        <select className="select" value={f.site_code} onChange={set("site_code")}>
+        <SearchSelect className="select" value={f.site_code} onChange={set("site_code")}>
           <option value="">{needsSite ? "Select the plant…" : "All plants"}</option>
           {opts.sites.map((s) => <option key={s.code} value={s.code}>{s.name} ({s.code})</option>)}
-        </select></label>
+        </SearchSelect></label>
       {f.site_code && (
         <label className="field"><span className="overline">Usual area · filled in on their issue reports</span>
-          <select className="select" value={f.area_code} onChange={set("area_code")}>
+          <SearchSelect className="select" value={f.area_code} onChange={set("area_code")}>
             <option value="">No usual area</option>
             {areas.map((a) => <option key={a.code} value={a.code}>{a.name} ({a.code})</option>)}
-          </select></label>
+          </SearchSelect></label>
       )}
       <label className="field"><span className="overline">Usual project · filled in on their issue reports</span>
-        <select className="select" value={f.project_id} onChange={set("project_id")}>
+        <SearchSelect className="select" value={f.project_id} onChange={set("project_id")}>
           <option value="">No usual project</option>
           {opts.projects.map((p) => <option key={p.id} value={p.id}>{p.name}{p.name !== p.code ? ` (${p.code})` : ""}</option>)}
-        </select></label>
+        </SearchSelect></label>
       {isNew && <PasswordField value={f.password} onChange={(v) => setF((c) => ({ ...c, password: v }))} />}
       <div className="row" style={{ justifyContent: "flex-end" }}>
         <button className="btn ghost" onClick={onClose}>Cancel</button>
