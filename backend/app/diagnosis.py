@@ -27,7 +27,7 @@ from .catalog import SEVERITIES, SYMPTOM_BY_ID, report_hint, report_summary, sym
 NOT_SURE = "Not sure"
 HOW = "How do I check this?"
 CANT = "I can't check this"
-SKIP_WHY = "Skip to the fix"
+SKIP_WHY = "Skip to the root cause"
 DONE = "Done"
 STEP_HOW = "How do I do this?"
 STEP_CANT = "I can't do this step"
@@ -36,6 +36,10 @@ WORKING = "Yes, it's working normally"
 NOT_WORKING = "No, still a problem"
 CLOSE_REPLY = "No issue found, close session"
 PERSISTS = "I applied the recommended steps but the issue persists."
+AGREE = "Yes, that's the cause"
+DISAGREE = "No, that's not it"
+_AGREE_TEXT = re.compile(r"^(yes|yep|yeah|agree|i agree|correct|right|that'?s it|makes sense|ok|okay)\b", re.I)
+_DISAGREE_TEXT = re.compile(r"^(no|nope|not|disagree|i disagree|wrong|i don'?t think)\b", re.I)
 _NOT_SURE_TEXT = re.compile(r"\b(not sure|unsure|don'?t know|no idea|can'?t tell|whole area)\b", re.I)
 _QUESTION = re.compile(r"^(what|why|how|when|where|which|who|whose|is|are|was|were|can|could|should|shall|do|does|did|"
                        r"will|would|may|might|any|tell me|explain)\b", re.I)
@@ -882,13 +886,27 @@ def send(sid: str, text: str, user: dict, choices: list[str] | None = None, file
     if phase in ("fix", "verify"):
         return _fix_turn(s, text, user)
 
+    rejected = False
+    if phase == "agree":
+        if text == AGREE or (text != DISAGREE and _AGREE_TEXT.match(text) and not _is_question(text)):
+            _give_solution(s)
+            save_session(s)
+            return load_session(sid)
+        if text == DISAGREE or _DISAGREE_TEXT.match(text):
+            _reject_root_cause(s)  # then troubleshooting carries on below, this message as the latest observation
+            rejected = True
+        else:
+            _side_turn(s, text)  # a question or a remark: answer it and ask again
+            save_session(s)
+            return load_session(sid)
+
     if st.get("survey") and phase in (None, "diagnose"):
         # the present-condition checks are open: answer the message, the checks wait for the form
         _side_turn(s, text, after="When you're ready, fill in the condition checks above and submit them.")
         save_session(s)
         return load_session(sid)
 
-    if s["identified"] and text != PERSISTS:  # solution given without guided steps (e.g. by a human expert earlier)
+    if s["identified"] and text != PERSISTS and not rejected:  # solution given without guided steps (e.g. by a human expert earlier)
         _side_turn(s, text)
         save_session(s)
         return load_session(sid)
@@ -1106,8 +1124,8 @@ def _start_fix(s: dict, who: str, expert: bool, steps: list[str], prevent: list[
     rules = _rules_for(s, area, eq)
     st["fix"]["safety"] = rules[0]["action"] if rules else None
     add_msg(s["id"], "agent", who=who, expert=expert,
-            text=f"Let's fix it — {len(steps)} short step{'s' if len(steps) > 1 else ''}, one at a time. Tap Done as you "
-                 "finish each one, and ask me anything along the way.",
+            text=f"Let's put it right — {len(steps)} short step{'s' if len(steps) > 1 else ''}, one at a time. Tap Done "
+                 "as you finish each one, and ask me anything along the way.",
             safety=st["fix"]["safety"] or "Follow your site safety rules and use the right protective equipment.")
     _ask_step(s, who, expert)
 
@@ -1306,7 +1324,7 @@ def _ask_why(s: dict, cause: dict, who: str, expert: bool, intro: bool = False, 
     rca = s["state"]["rca"]
     node = _why_node(cause, rca["node"])
     if intro:
-        text = f"Before we fix it, a minute on why it happened, so the fix sticks. {node['text']}"
+        text = f"Now let's find out why it happened, so we fix the real cause. {node['text']}"
     else:
         text = f"{lead} {node['text']}".strip()
     add_msg(s["id"], "agent", who=who, expert=expert, text=text, prompt=node["text"], how=node.get("how"),
@@ -1394,24 +1412,66 @@ def _finalize_rca(s: dict, area: dict, eq: dict, cause: dict, root: dict | None,
     steps = list(cause["steps"]) + [x for x in extra if x not in cause["steps"]]
     rules = _rules_for(s, area, eq)
     complete = bool(root) and not (rca["chain"] and rca["chain"][-1].get("own"))
-    add_msg(s["id"], "solution", who=who, expert=expert, root_cause=root_label, direct_cause=rca["direct_cause"],
-            category=category, category_label=CATEGORY_LABEL.get(category, category), why_chain=rca["chain"],
-            steps=steps, preventive=prevent, safety=next((r["action"] for r in rules), None),
-            basis=("past case " + ", ".join(cases) + " and " if cases else "") + "your field checks"
-                  + (" and answers" if rca["chain"] else ""),
-            text="Found the root cause." if complete else "Here's what we know.")
-    rca.update(root=root_label, category=category, prevent=prevent)
-    s["identified"] = 1
-    s["root_cause"], s["steps"] = root_label, steps
+    _propose_root_cause(s, who, expert, root_cause=root_label, category=category, steps=steps, prevent=prevent,
+                        cases=cases, safety=next((r["action"] for r in rules), None), complete=complete)
+
+
+def _propose_root_cause(s: dict, who: str, expert: bool, root_cause: str, category: str, steps: list[str],
+                        prevent: list[str], cases: list[str], safety: str | None, complete: bool = True) -> None:
+    """Troubleshooting is done: show the root cause and ask the field operator whether they agree. The fix is only
+    given once they do (_give_solution); if they don't, troubleshooting carries on without this cause."""
+    st = s["state"]
+    rca = st["rca"]
+    basis = ("past case " + ", ".join(cases) + " and " if cases else "") + "your field checks" \
+            + (" and answers" if rca.get("chain") else "")
+    st["proposal"] = {"root_cause": root_cause, "category": category, "steps": list(steps), "prevent": list(prevent or []),
+                      "cases": list(cases), "safety": safety, "basis": basis, "complete": complete, "who": who,
+                      "expert": expert}
+    rca.update(root=root_cause, category=category, prevent=list(prevent or []))
     s["cited"] = sorted(set(s["cited"]) | set(cases))
+    st["phase"] = "agree"
+    st["pending"] = None
+    add_msg(s["id"], "root_cause", who=who, expert=expert, root_cause=root_cause, direct_cause=rca["direct_cause"],
+            category=category, category_label=CATEGORY_LABEL.get(category, category), why_chain=rca.get("chain") or [],
+            basis=basis, prompt="Do you agree this is the root cause?",
+            text=("Here's the root cause." if complete else "Here's the most likely root cause from what we know.")
+                 + " Do you agree with it? If you do, I'll give you the fix.",
+            replies=[AGREE, DISAGREE])
+
+
+def _give_solution(s: dict) -> None:
+    """The field operator agreed with the root cause: give the fix, then walk them through it."""
+    st = s["state"]
+    p, rca = st["proposal"], st["rca"]
+    who, expert = p.get("who") or "SiteBrain", bool(p.get("expert"))
+    add_msg(s["id"], "solution", who=who, expert=expert, root_cause=p["root_cause"], direct_cause=rca["direct_cause"],
+            category=p["category"], category_label=CATEGORY_LABEL.get(p["category"], p["category"]),
+            why_chain=rca.get("chain") or [], steps=p["steps"], preventive=p["prevent"], safety=p.get("safety"),
+            basis=p["basis"], text="Here's the solution.")
+    st["proposal"] = None
+    s["identified"] = 1
+    s["root_cause"], s["steps"] = p["root_cause"], p["steps"]
     s["identified_at"] = s.get("identified_at") or db.now_iso()
-    _start_fix(s, who, expert, steps, prevent)
+    _start_fix(s, who, expert, p["steps"], p["prevent"])
+
+
+def _reject_root_cause(s: dict) -> None:
+    """The field operator doesn't agree: rule the direct cause out and go back to troubleshooting."""
+    st = s["state"]
+    rca = st.get("rca") or {}
+    top = rca.get("cause") or (s["causes"][0].get("id") if s["causes"] else None)
+    if top and top in st.get("posterior", {}):
+        st.setdefault("excluded", []).append(top)
+    event(s["id"], f"Root cause not agreed: {rca.get('root') or rca.get('direct_cause') or 'proposed cause'} · "
+                   "troubleshooting continues", "close-circle-outline", "warn")
+    st.update(phase="diagnose", rca=None, pending=None, proposal=None)
+    s["identified_at"] = None
 
 
 def _post_turn_checks(s: dict) -> None:
     """Escalation triggers evaluated deterministically after every bot turn (SRS §4.2); they suggest, never escalate."""
     s = load_session(s["id"])
-    if s["mode"] != "bot" or s["identified"]:
+    if s["mode"] != "bot" or s["identified"] or s["state"].get("phase") == "agree":
         return
     st = s["state"]
     reason = None
@@ -1508,6 +1568,9 @@ def transcript(sid: str) -> list[dict]:
         elif m["type"] == "finding":
             out.append({"role": "assistant", "content": f"Direct cause found: {m['direct_cause']} [{m.get('category')}]. "
                                                         f"Immediate actions: {'; '.join(m.get('steps') or [])}"})
+        elif m["type"] == "root_cause":
+            out.append({"role": "assistant", "content": f"Proposed root cause: {m['root_cause']}. "
+                                                        "Asked the operator whether they agree before giving the fix."})
         elif m["type"] == "solution":
             chain = " > ".join(f"{w['why']} {w['because']}" for w in m.get("why_chain") or [])
             out.append({"role": "assistant", "content": f"Root cause: {m['root_cause']}. Why chain: {chain or '-'}. "
@@ -1551,6 +1614,9 @@ def _bot_system(s: dict, area: dict, eq: dict) -> str:
         "- The operator may have answered several checks at once (a 'Present condition' message): weigh every answer "
         "and never ask those checks again.",
         "- In stages 'why' and 'done' set instruction, purpose and how to null.",
+        "- The fix is never given before the root cause is agreed: in stage 'done' the app shows the root cause and asks "
+        "the field operator whether they agree, and only then gives your steps. If the history shows a proposed root "
+        "cause the operator did not agree with, rule that cause out, go back to stage 'fishbone' and keep checking.",
         "- When one direct cause reaches likelihood >= 0.85, set stage 'why', fill direct_cause, fishbone_category and "
         "immediate_actions (3-5 corrective steps), and ask the first WHY question (use the cause's 5-Why tree as a guide, "
         "but accept the field operator's own explanation). Quick replies = likely answers + \"Not sure\".",
@@ -1635,26 +1701,20 @@ def _llm_bot_turn(s: dict, area: dict, eq: dict, text: str | None) -> bool:
                 category_label=CATEGORY_LABEL.get(cat, cat), confidence=s["confidence"],
                 steps=data.get("immediate_actions") or data.get("steps") or [], safety=next((r["action"] for r in rules), None),
                 text=f"I'm now fairly confident the direct cause is {data['direct_cause'].lower()}. "
-                     "Make it safe and put it right with the steps below.")
+                     "Next, let's find out why it happened.")
         st["rca"] = {"cause": None, "direct_cause": data["direct_cause"], "category": cat, "chain": [], "node": []}
         s["identified_at"] = s.get("identified_at") or db.now_iso()
     if stage == "done" and data.get("identified") and data.get("root_cause"):
         cases = data.get("cited_cases") or []
         chain = [{"why": w.get("why", ""), "because": w.get("because", "")} for w in data.get("why_chain") or []]
         cat = data.get("fishbone_category") or (st.get("rca") or {}).get("category") or "Machine"
-        add_msg(s["id"], "solution", who="SiteBrain", root_cause=data["root_cause"],
-                direct_cause=(st.get("rca") or {}).get("direct_cause") or data.get("direct_cause"),
-                category=cat, category_label=CATEGORY_LABEL.get(cat, cat), why_chain=chain,
-                steps=data.get("steps") or [], preventive=data.get("preventive_actions") or [],
-                basis=("past case " + ", ".join(cases) + " and " if cases else "") + "your field checks and answers",
-                safety=next((r["action"] for r in rules), None), text="Found the root cause.")
-        st["rca"] = {**(st.get("rca") or {}), "chain": chain, "root": data["root_cause"], "category": cat,
-                     "prevent": data.get("preventive_actions") or []}
-        s["identified"] = 1
-        s["root_cause"], s["steps"] = data["root_cause"], data.get("steps") or []
+        st["rca"] = {"cause": None, "direct_cause": data.get("direct_cause") or data["root_cause"], "node": [],
+                     **(st.get("rca") or {}), "chain": chain, "category": cat}
         s["identified_at"] = s.get("identified_at") or db.now_iso()
         s["confidence"] = max(s["confidence"], config.CONFIDENCE_THRESHOLD)
-        _start_fix(s, "SiteBrain", False, data.get("steps") or [], data.get("preventive_actions") or [])
+        _propose_root_cause(s, "SiteBrain", False, root_cause=data["root_cause"], category=cat,
+                            steps=data.get("steps") or [], prevent=data.get("preventive_actions") or [], cases=cases,
+                            safety=next((r["action"] for r in rules), None))
     elif stage == "fishbone":
         _llm_check(s, area, eq, data)
         st["unidentified"] = bool(data.get("unidentified"))
@@ -1749,7 +1809,7 @@ def save_files(sid: str, user: dict, attachments: list[dict]) -> list[dict]:
 
 
 # helper replies that are not observations a photo or a voice note could show
-_NOT_OBSERVATIONS = {HOW, CANT, NOT_SURE, SKIP_WHY, DONE, STEP_HOW, STEP_CANT, ALL_STEPS, WORKING, NOT_WORKING, CLOSE_REPLY}
+_NOT_OBSERVATIONS = {HOW, CANT, NOT_SURE, SKIP_WHY, AGREE, DISAGREE, DONE, STEP_HOW, STEP_CANT, ALL_STEPS, WORKING, NOT_WORKING, CLOSE_REPLY}
 
 
 def _media_context(s: dict, check_id: str | None) -> tuple[str, dict | None]:
@@ -1864,7 +1924,7 @@ def chat_summary(sid: str) -> str:
         lines.append(f"{skipped} check{'s' if skipped != 1 else ''} could not be done.")
     if not answered and not skipped:
         lines.append("No checks have been answered yet.")
-    found = next((m for m in reversed(messages(sid)) if m["type"] in ("finding", "solution")), None)
+    found = next((m for m in reversed(messages(sid)) if m["type"] in ("finding", "root_cause", "solution")), None)
     if found:
         lines.append(f"SiteBrain's finding: {found.get('root_cause') or found.get('direct_cause')}.")
     elif s["causes"]:

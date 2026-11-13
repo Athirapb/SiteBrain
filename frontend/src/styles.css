@@ -481,10 +481,11 @@ button.voice-panel:disabled { opacity: 0.5; cursor: not-allowed; }
 .send-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .similar-anchor { position: relative; height: 0; z-index: 6; }
-.similar-fab { position: absolute; right: 16px; top: 12px; z-index: 5; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--t10); background: var(--white); color: var(--t80); border-radius: var(--pill); padding: 8px 14px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: var(--elev-8); }
+.similar-fab { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--t10); background: var(--white); color: var(--t80); border-radius: var(--pill); padding: 6px 12px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.similar-fab.on { border-color: var(--gps-primary); background: #f7fbf2; color: var(--gps-green-dark); }
 .similar-fab:hover { border-color: var(--gps-primary); }
 .fab-count { background: var(--gps-primary); color: #fff; border-radius: var(--pill); padding: 1px 7px; font-size: 11px; }
-.similar-panel { position: absolute; right: 16px; top: 12px; z-index: 6; width: min(380px, calc(100% - 32px)); max-height: 55vh; overflow-y: auto; background: var(--white); border-radius: 12px; box-shadow: var(--elev-8); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.similar-panel { position: absolute; right: 16px; top: 6px; z-index: 6; width: min(380px, calc(100% - 32px)); max-height: 55vh; overflow-y: auto; background: var(--white); border-radius: 12px; box-shadow: var(--elev-8); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 
 .summary { flex: 0 0 360px; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
 

@@ -185,12 +185,13 @@ function SessionModal({ sid, onClose, onOpen, canOpen }) {
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {v.messages.filter((m) => ["report", "user", "agent", "analysis", "event"].includes(m.type)).map((m) => (
+            {v.messages.filter((m) => ["report", "user", "agent", "analysis", "event", "root_cause"].includes(m.type)).map((m) => (
               <div key={m.id} style={{ fontSize: 13, lineHeight: 1.5 }}>
                 <b style={{ color: ["user", "report"].includes(m.type) ? "var(--gps-primary)" : m.type === "event" ? "var(--t50)" : m.expert ? "var(--gps-info)" : "var(--t80)" }}>
                   {["user", "report"].includes(m.type) ? m.author || "Field operator" : m.type === "event" ? "•" : m.who || "SiteBrain"}
                 </b>{" "}
                 <span style={{ color: m.type === "event" ? "var(--t60)" : undefined }}>{m.text}</span>
+                {m.type === "root_cause" && <> <b>{m.root_cause}</b></>}
                 {(m.attachments || []).length > 0 && (
                   <span className="caption"> <Icon name="paperclip" size={13} />{m.attachments.map((f) => f.filename).join(", ")}</span>
                 )}

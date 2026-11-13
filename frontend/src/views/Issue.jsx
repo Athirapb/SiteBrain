@@ -12,10 +12,10 @@ const JOURNEY = [
   ["Resolution", "wrench-outline"],
 ];
 // helper replies that steer the conversation rather than answer it
-const SOFT_REPLIES = new Set(["How do I check this?", "I can't check this", "Not sure", "Skip to the fix",
+const SOFT_REPLIES = new Set(["How do I check this?", "I can't check this", "Not sure", "Skip to the root cause", "No, that's not it",
                               "How do I do this?", "I can't do this step", "Show all steps", "No, still a problem"]);
 // replies that move the job forward: shown as action buttons, not as observations
-const ACTION_REPLIES = new Set(["Done", "Yes, it's working normally", "No issue found, close session"]);
+const ACTION_REPLIES = new Set(["Done", "Yes, that's the cause", "Yes, it's working normally", "No issue found, close session"]);
 // replies that end the chat: the field operator confirms them first
 const CLOSING_REPLIES = new Set(["Yes, it's working normally", "No issue found, close session"]);
 const TONE = { warn: ["#fff7e6", "#b36b00"], info: ["#e8f2fd", "#1c6fc1"], ok: ["#e3f2d4", "#006400"] };
@@ -181,6 +181,7 @@ export default function Issue({ user, params, nav, notify, refreshShared }) {
     : isExpert ? `Reply to ${reporter}`
     : withExpert ? "Message the experts — they'll see it when they reply"
     : sv.survey ? "Answer the check above, or ask me anything"
+    : sv.phase === "agree" ? "Agree with the root cause, or tell me what you think it is"
     : sv.phase === "fix" ? "Tap Done when finished, or ask me anything"
     : sv.localizing ? "Name the equipment, or say Not sure"
     : "Type a message";
@@ -238,6 +239,11 @@ export default function Issue({ user, params, nav, notify, refreshShared }) {
               </div>
             );
           })}
+          {!isExpert && sv.cases.length > 0 && (
+            <button className={`similar-fab ${similar ? "on" : ""}`} aria-expanded={similar} onClick={() => setSimilar((x) => !x)}>
+              <Icon name="book-search-outline" size={18} />Similar Past Cases<span className="fab-count">{sv.cases.length}</span>
+            </button>
+          )}
         </div>
         {sv.interlocks.length > 0 && (
           <div className="interlock-strip">
@@ -250,19 +256,13 @@ export default function Issue({ user, params, nav, notify, refreshShared }) {
           </div>
         )}
 
-        {!isExpert && sv.cases.length > 0 && (
+        {!isExpert && sv.cases.length > 0 && similar && (
           <div className="similar-anchor">
-          {similar ? (
             <div className="similar-panel" role="dialog" aria-label="Similar past cases">
               <div className="row"><div className="card-title grow">Similar Past Cases</div>
                 <button className="btn ghost round sm" onClick={() => setSimilar(false)} aria-label="Close"><Icon name="close" /></button></div>
               <SimilarCases cases={sv.cases} />
             </div>
-          ) : (
-            <button className="similar-fab" onClick={() => setSimilar(true)}>
-              <Icon name="book-search-outline" size={18} />Similar Past Cases<span className="fab-count">{sv.cases.length}</span>
-            </button>
-          )}
           </div>
         )}
         <div className="msgs wa" ref={scrollRef}>
@@ -518,16 +518,15 @@ function Message({ m, sid, showReplies, onReply, onEscalate, onDismissOffer, off
           <span className="bubble-time">{timeOf(m.created_at)}</span>
         </div>
       )}
-      {m.type === "solution" && (
+      {m.type === "root_cause" && (
         <div className="bubble-agent wide">
           {who}
-          <div className="panel solution">
-            <div className="overline"><Icon name="check-decagram-outline" size={14} /> {m.expert ? "Resolution from the expert" : "Why it happened"}</div>
+          <div>{m.text}</div>
+          <div className="panel finding">
+            <div className="overline"><Icon name="target" size={14} /> Root cause</div>
             <div style={{ fontSize: 16, fontWeight: 600, lineHeight: 1.4 }}>{m.root_cause}</div>
             {m.direct_cause && m.direct_cause !== m.root_cause && <div className="caption" style={{ color: "var(--t70)" }}>What failed: {m.direct_cause}</div>}
-            {m.expert && (m.steps || []).length > 0 && (
-              <ol style={{ margin: 0, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 4 }}>{m.steps.map((x, j) => <li key={j}>{x}</li>)}</ol>
-            )}
+            {m.category_label && <div className="caption">Category: {m.category_label}</div>}
             {(m.why_chain || []).length > 0 && (
               <details>
                 <summary className="link-summary">How we got here</summary>
@@ -535,6 +534,24 @@ function Message({ m, sid, showReplies, onReply, onEscalate, onDismissOffer, off
                   {m.why_chain.map((w, j) => <li key={j} className="caption" style={{ color: "var(--t70)", lineHeight: 1.5 }}>{w.why} <b>{w.because}</b></li>)}
                 </ol>
               </details>
+            )}
+            {m.basis && <div className="caption">Based on {m.basis}</div>}
+          </div>
+          <span className="bubble-time">{timeOf(m.created_at)}</span>
+        </div>
+      )}
+      {m.type === "solution" && (
+        <div className="bubble-agent wide">
+          {who}
+          <div className="panel solution">
+            <div className="overline"><Icon name="wrench-outline" size={14} /> {m.expert ? "Resolution from the expert" : "Solution"}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.4 }}>Root cause: {m.root_cause}</div>
+            {m.expert && m.direct_cause && m.direct_cause !== m.root_cause && <div className="caption" style={{ color: "var(--t70)" }}>What failed: {m.direct_cause}</div>}
+            {(m.steps || []).length > 0 && (
+              <>
+                <div className="caption" style={{ fontWeight: 600, color: "var(--t80)" }}>How to fix it</div>
+                <ol style={{ margin: 0, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 4 }}>{m.steps.map((x, j) => <li key={j}>{x}</li>)}</ol>
+              </>
             )}
             {(m.preventive || []).length > 0 && (
               <details>

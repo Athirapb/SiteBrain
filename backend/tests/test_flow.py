@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import catalog, config, safety, seed
-from app.diagnosis import CANT, DONE, HOW, NOT_SURE, NOT_WORKING, SKIP_WHY, STEP_HOW, WORKING
+from app.diagnosis import AGREE, CANT, DISAGREE, DONE, HOW, NOT_SURE, NOT_WORKING, SKIP_WHY, STEP_HOW, WORKING
 from app.main import app
 
 
@@ -205,10 +205,16 @@ def test_equipment_report_troubleshoots_without_signoff_then_resolves(client):
     assert v["phase"] == "why" and SKIP_WHY in last_replies(v)
     assert "KB-0412" in v["session"]["cited"]
     for _ in range(5):  # follow the why tree down its first branches to a root cause
-        if v["session"]["identified"]:
+        if v["phase"] == "agree":
             break
         v = say(client, sid, last_replies(v)[0], h)
+    # the root cause is shown first, with no fix until the field operator agrees with it
+    proposed = v["messages"][-1]
+    assert proposed["type"] == "root_cause" and proposed["replies"] == [AGREE, DISAGREE]
+    assert not v["session"]["identified"] and not any(m["type"] == "solution" for m in v["messages"])
+    v = say(client, sid, AGREE, h)
     sol = next(m for m in v["messages"] if m["type"] == "solution")
+    assert sol["root_cause"] == proposed["root_cause"] and sol["steps"]
     assert v["session"]["identified"] == 1 and sol["why_chain"] and sol["preventive"]
     assert sol["category"] in ("Man", "Machine", "Method", "Material", "Measurement", "Environment")
     assert v["session"]["root_cause"] == sol["root_cause"] != "Gearbox output bearing wear"
@@ -232,6 +238,8 @@ def test_pump_seal_rca_reaches_a_systemic_root_cause(client):
     assert next(m for m in v["messages"] if m["type"] == "finding")["direct_cause"] == "Mechanical seal face damage"
     for t in ["It ran dry — flush water was off or weak", "Flush valve left closed after maintenance"]:
         v = say(client, sid, t, h)
+    assert v["phase"] == "agree" and v["messages"][-1]["type"] == "root_cause"
+    v = say(client, sid, AGREE, h)
     sol = next(m for m in v["messages"] if m["type"] == "solution")
     assert sol["root_cause"].startswith("No flush-water line-up check") and sol["category"] == "Method"
     assert [w["because"] for w in sol["why_chain"]] == ["It ran dry — flush water was off or weak",
@@ -260,7 +268,7 @@ def test_technician_can_chat_anytime_and_reopen_when_fix_fails(client):
     assert side["side"] and side["text"] and last_replies(v) == pending and v["session"]["turns"] == 0
     v = say(client, sid, "The pump was overhauled last week by a contractor", h)  # extra information, noted
     assert v["messages"][-1]["side"] and last_replies(v) == pending
-    for t in ["From the seal or gland", "No flow at all", SKIP_WHY]:
+    for t in ["From the seal or gland", "No flow at all", SKIP_WHY, AGREE]:
         v = say(client, sid, t, h)
     v = say(client, sid, "Do I need a permit for this?", h)  # questions during the fix get answers too
     assert v["messages"][-1]["side"] and v["phase"] == "fix"
@@ -286,6 +294,7 @@ def test_technician_can_ask_how_skip_checks_and_give_own_why(client):
     for t in ["From the seal or gland", "No flow at all"]:
         v = say(client, sid, t, h)
     v = say(client, sid, "The flush pump was switched off to save power during the night shift", h)
+    v = say(client, sid, AGREE, h)
     sol = next(m for m in v["messages"] if m["type"] == "solution")
     assert sol["root_cause"].startswith("The flush pump was switched off") and sol["why_chain"][-1].get("own")
 
@@ -294,10 +303,31 @@ def test_skipping_the_why_why_still_gives_an_rca_summary(client):
     h = login(client, "operator1")
     v = report(client, h, equipment_id="GPS-BUU-04|D1|D1 Transfer Pump 1", symptoms=["leak"])
     sid = v["session"]["id"]
-    for t in ["From the seal or gland", "No flow at all", SKIP_WHY]:
+    for t in ["From the seal or gland", "No flow at all", SKIP_WHY, AGREE]:
         v = say(client, sid, t, h)
     sol = next(m for m in v["messages"] if m["type"] == "solution")
     assert v["session"]["identified"] == 1 and sol["root_cause"] == "Mechanical seal face damage" and not sol["why_chain"]
+
+
+def test_disagreeing_with_the_root_cause_goes_back_to_troubleshooting(client):
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|D3|D3 Transfer Pump 1", symptoms=["leak"])
+    sid = v["session"]["id"]
+    for t in ["From the seal or gland", "No flow at all", SKIP_WHY]:
+        v = say(client, sid, t, h)
+    assert v["phase"] == "agree" and v["messages"][-1]["root_cause"] == "Mechanical seal face damage"
+    v = say(client, sid, "What does seal face damage look like?", h)  # a question gets an answer, the ask stays
+    assert v["phase"] == "agree" and v["messages"][-1]["side"]
+    v = say(client, sid, DISAGREE, h)
+    assert v["phase"] == "diagnose" and not v["session"]["identified"] and not v["rca"]
+    assert not any(m["type"] == "solution" for m in v["messages"])
+    assert "seal" in diagnosis_state(sid)["excluded"]
+    assert v["messages"][-1]["type"] != "root_cause" or v["messages"][-1]["root_cause"] != "Mechanical seal face damage"
+
+
+def diagnosis_state(sid):
+    from app import diagnosis
+    return diagnosis.load_session(sid)["state"]
 
 
 def test_llm_outage_during_why_why_continues_on_the_knowledge_brain(client):
@@ -765,7 +795,7 @@ def test_resolved_sessions_teach_the_tree(client):
         v = report(client, h, equipment_id=f"GPS-BUU-04|D4|D4 RC Pump {1 + n % 2}" if n < 2 else "GPS-BUU-04|D4|D4 Transfer Pump 1",
                    symptoms=["leak"])
         sid = v["session"]["id"]
-        for t in ["From the seal or gland", "No flow at all", SKIP_WHY]:
+        for t in ["From the seal or gland", "No flow at all", SKIP_WHY, AGREE]:
             v = say(client, sid, t, h)
         assert client.post(f"/api/sessions/{sid}/resolve", headers=h).json()["session"]["status"] == "resolved"
     rep = client.get("/api/kb/learning?kind=Pump", headers=ex).json()["kinds"][0]
