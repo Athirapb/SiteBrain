@@ -203,7 +203,13 @@ def detect_kinds(text: str, title: str = "", min_hits: int = 3) -> list[str]:
     """
     counts = {k: 5 * len(rx.findall(title)) + len(rx.findall(text)) for k, rx in _KIND_RE.items()}
     top = max(counts.values())
-    return sorted(k for k, n in counts.items() if n >= min_hits and n >= top / 4)
+    kinds = sorted(k for k, n in counts.items() if n >= min_hits and n >= top / 4)
+    # a whole document covering most of the plant's equipment is a general guide (its passages are still matched to
+    # the equipment they talk about)
+    return [] if min_hits >= 3 and len(kinds) >= GENERAL_KINDS else kinds
+
+
+GENERAL_KINDS = 6
 
 
 def _cases_from_csv(text: str, site_code: str | None, kind_hint: str | None, doc_id: int | None = None) -> int:

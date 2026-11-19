@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import db
+from ..brain import variants
 from ..auth import check_site, current_user, require, site_scope
 from ..catalog import KIND_ICON, KINDS
 
@@ -114,6 +115,7 @@ class EquipmentIn(BaseModel):
     kind: str
     tag: str | None = None
     active: bool = True
+    variant: str | None = None  # its type within the kind (brain/variants.py); left as it is when not sent
 
 
 def _clean_equipment(body: EquipmentIn, user: dict, eq_id: str | None = None) -> tuple[dict, dict]:
@@ -126,8 +128,14 @@ def _clean_equipment(body: EquipmentIn, user: dict, eq_id: str | None = None) ->
     if db.q1("SELECT id FROM equipment WHERE site_code=? AND LOWER(name)=? AND id!=?",
              (area["site_code"], name.lower(), eq_id or "")):
         raise HTTPException(409, f"An equipment named {name} already exists at this site")
-    return area, {"area_id": area["id"], "name": name, "kind": body.kind, "tag": (body.tag or "").strip() or None,
-                  "active": body.active}
+    row = {"area_id": area["id"], "name": name, "kind": body.kind, "tag": (body.tag or "").strip() or None,
+           "active": body.active}
+    if body.variant is not None:
+        if body.variant and not variants.get(body.kind, body.variant):
+            raise HTTPException(400, f"Type of {body.kind} must be one of "
+                                     f"{', '.join(v['id'] for v in variants.variants(body.kind)) or 'none'}")
+        row["variant"] = body.variant or None
+    return area, row
 
 
 @router.post("/equipment")
@@ -151,6 +159,8 @@ def update_equipment(body: EquipmentIn, id: str = Query(...), user: dict = Depen
     area, row = _clean_equipment(body, user, id)
     if area["site_code"] != e["site_code"]:
         raise HTTPException(400, "Equipment can only move between areas of the same site")
+    if row["kind"] != e["kind"] and "variant" not in row:
+        row["variant"] = None  # a type of the old kind means nothing for the new one
     db.update("equipment", "id", id, row)
     db.audit(user["name"], user["role"], "setup.equipment_updated", id,
              {"before": {k: e[k] for k in row}, "after": row}, e["site_code"])

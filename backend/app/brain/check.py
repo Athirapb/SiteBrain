@@ -8,7 +8,7 @@ import re
 import sys
 
 from .. import config, safety, telemetry
-from . import CATEGORIES, CONDITIONS, MAINTENANCE, TREES, CASES, depth, roots
+from . import CATEGORIES, CONDITIONS, MAINTENANCE, TREES, CASES, depth, roots, variants
 
 MAX_LABEL = 60
 
@@ -23,7 +23,8 @@ def check_structure(kind: str, tree: dict) -> list[str]:
     ids = [c["id"] for c in tree["causes"]]
     if len(set(ids)) != len(ids):
         err.append("duplicate cause ids")
-    own = [c for c in tree["causes"] if c["id"][:2] not in ("e_", "o_")]  # the shared ones are linted in common.py
+    # the shared ones (common.py, process.py) and a type's own ones (variants.py) are not counted
+    own = [c for c in tree["causes"] if c["id"][:2] not in ("e_", "o_") and c["id"] != "p_conn"]
     if not 3 <= len(own) <= 9:
         err.append(f"{len(own)} direct causes of its own (want 3–9)")
     qids = [q["id"] for q in tree["questions"]]
@@ -136,7 +137,7 @@ def check_normal_options(tree: dict) -> list[str]:
     ids = [c["id"] for c in tree["causes"]]
     for q in tree["questions"]:
         untested = [c for c in ids if max(o["lik"].get(c, 1.0) for o in q["options"]) < 1.5
-                    and c[:2] not in ("e_", "o_")]  # shared causes favour healthy mechanical readings on purpose
+                    and c[:2] not in ("e_", "o_", "p_", "v_")]  # these favour healthy machine readings on purpose
         if len(untested) < 2:
             continue
         for i, o in enumerate(q["options"]):
@@ -151,6 +152,52 @@ def check_normal_options(tree: dict) -> list[str]:
     return warn
 
 
+def check_variants(kind: str) -> list[str]:
+    """Each type of the kind: valid ids, its bias / drop / evidence refer to real causes and checks."""
+    err = []
+    base = TREES[kind]
+    cause_ids = {c["id"] for c in base["causes"]}
+    q_ids = {q["id"] for q in base["questions"]}
+    vs = variants.variants(kind)
+    if len({v["id"] for v in vs}) != len(vs):
+        err.append("duplicate type ids")
+    if len(vs) > 1 and not any(v["default"] for v in vs):
+        err.append("no default type")
+    for v in vs:
+        p = f"type {v['id']}"
+        if not v["look"] or not v["works"] or not v["normal"]:
+            err.append(f"{p}: needs look, works and normal")
+        own = {c["id"] for c in v["causes"]}
+        if any(not c.startswith("v_") for c in own):
+            err.append(f"{p}: its own cause ids must start with v_")
+        bad = set(v["bias"]) - cause_ids
+        if bad:
+            err.append(f"{p}: bias for unknown causes {sorted(bad)}")
+        bad = set(v["drop"]) - q_ids
+        if bad:
+            err.append(f"{p}: drops unknown checks {sorted(bad)}")
+        for qid, _pat, lik in v["evidence"]:
+            if qid not in q_ids or set(lik) - cause_ids - own:
+                err.append(f"{p}: evidence on {qid} refers to unknown checks or causes")
+    return err
+
+
+def _report(name: str, kind: str, tree: dict, errs: list[str]) -> int:
+    warns = check_normal_options(tree)
+    sims = [(c["id"], *simulate(tree, c)) for c in tree["causes"]]
+    bad = [s for s in sims if not s[1]]
+    print(f"{name}: {len(tree['causes'])} causes, {len(tree['questions'])} checks, "
+          f"{sum(len(roots(c['why'])) for c in tree['causes'] if c.get('why'))} root causes — "
+          f"{'OK' if not errs and not bad else 'FAIL'}")
+    for e in errs:
+        print(f"   ✗ {e}")
+    for w in warns:
+        print(f"   ⚠ {w}")
+    for cid, ok, turns, what in sims:
+        print(f"   {'✓' if ok else '✗'} {cid:<10} {turns} turn(s): {what}")
+    return len(errs) + len(bad)
+
+
 def main(kinds: list[str]) -> int:
     failures = 0
     for kind in kinds or sorted(TREES):
@@ -158,20 +205,11 @@ def main(kinds: list[str]) -> int:
         if "category" not in tree["causes"][0]:
             print(f"{kind}: legacy tree (not yet in the brain) — skipped")
             continue
-        errs = check_structure(kind, tree)
-        warns = check_normal_options(tree)
-        sims = [(c["id"], *simulate(tree, c)) for c in tree["causes"]]
-        bad = [s for s in sims if not s[1]]
-        failures += len(errs) + len(bad)
-        print(f"{kind}: {len(tree['causes'])} causes, {len(tree['questions'])} checks, "
-              f"{sum(len(roots(c['why'])) for c in tree['causes'] if c.get('why'))} root causes — "
-              f"{'OK' if not errs and not bad else 'FAIL'}")
-        for e in errs:
-            print(f"   ✗ {e}")
-        for w in warns:
-            print(f"   ⚠ {w}")
-        for cid, ok, turns, what in sims:
-            print(f"   {'✓' if ok else '✗'} {cid:<10} {turns} turn(s): {what}")
+        failures += _report(kind, kind, tree, check_structure(kind, tree) + check_variants(kind))
+        for v in variants.variants(kind):
+            if len(variants.variants(kind)) > 1 or v["causes"] or v["bias"] or v["drop"]:
+                typed = variants.apply(tree, v)
+                failures += _report(f"{kind} · {v['label']}", kind, typed, check_structure(kind, typed))
     print(f"\n{len(CASES)} RCA cases · {len(CONDITIONS)} operating-condition profiles · "
           f"{len(MAINTENANCE)} maintenance entries")
     ids = [c["id"] for c in CASES]

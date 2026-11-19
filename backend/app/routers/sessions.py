@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from .. import config, db, diagnosis, knowledge, llm, media, telemetry, topology
 from ..auth import check_site, current_user, require, site_scope
-from ..brain import tree_for
+from ..brain import variants
 from ..catalog import KIND_ICON, report_hint
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -48,7 +48,7 @@ def session_view(sid: str, user: dict) -> dict:
     place = eq or {"name": "", "unit": area["code"], "unit_name": area["name"]}
     st = s["state"]
     if eq and st.get("posterior") and s["engine"] == "rules":
-        bones = diagnosis.fishbone(tree_for(eq["kind"]), st["posterior"], st.get("excluded", []))
+        bones = diagnosis.fishbone(diagnosis._tree(s, eq), st["posterior"], st.get("excluded", []))
     else:  # LLM-ranked causes, or no equipment yet
         bones = diagnosis.bones_from_causes(s["causes"])
     return {
@@ -72,7 +72,10 @@ def session_view(sid: str, user: dict) -> dict:
         "llm": llm.status(),
         "media": media.enabled() and s["mode"] == "bot",  # attachments are read while SiteBrain troubleshoots
         "area": {k: area[k] for k in ("id", "code", "name")},
-        "equipment": {k: eq[k] for k in ("id", "name", "kind", "tag", "unit", "unit_name")} if eq else None,
+        "equipment": {**{k: eq[k] for k in ("id", "name", "kind", "tag", "unit", "unit_name")},
+                      # its type: confirmed in a chat (recorded) or the one this session works with
+                      "variant": (variants.get(eq["kind"], st.get("variant") or eq.get("variant")) or {}).get("label"),
+                      "variant_confirmed": bool(eq.get("variant"))} if eq else None,
         "icon": KIND_ICON.get(kind, "map-marker-outline"),
         "telemetry": telemetry.snapshot(eq, diagnosis.condition(s)) if eq else None,
         "topology": topology.context_for(place),

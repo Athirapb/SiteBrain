@@ -184,6 +184,7 @@ export default function Issue({ user, params, nav, notify, refreshShared }) {
     : sv.phase === "agree" ? "Agree with the root cause, or tell me what you think it is"
     : sv.phase === "fix" ? "Tap Done when finished, or ask me anything"
     : sv.localizing ? "Name the equipment, or say Not sure"
+    : sv.phase === "context" ? "Answer above, or tell me what's different about this equipment"
     : "Type a message";
 
   return (
@@ -396,7 +397,7 @@ export function Reading({ a, name }) {
 // Possible causes as one list, most likely first (the 6M structure stays in the engine)
 // Electrical and operating causes are tagged, so the operator sees they are being considered alongside mechanical ones
 const DOMAIN_TAG = { electrical: ["Electrical", "flash"], operational: ["Operational", "account-hard-hat"],
-                     instrument: ["Instrument", "gauge"] };
+                     instrument: ["Instrument", "gauge"], process: ["Process", "pipe"] };
 
 function CausesCard({ bones, first }) {
   const all = (bones || []).flatMap((b) => b.causes)
@@ -737,7 +738,7 @@ function IssueSummary({ sv, onLiveData }) {
           <Icon name={sv.equipment ? sv.icon : "map-marker-question-outline"} size={20} color="var(--t60)" />
           <div className="grow">
             <div style={{ color: "var(--t80)", fontWeight: 600 }}>{sv.equipment ? sv.equipment.name : "Equipment not identified yet"}</div>
-            <div className="caption">{sv.area.name}{sv.equipment ? ` · ${sv.equipment.kind}${sv.equipment.tag ? ` · ${sv.equipment.tag}` : ""}` : ""}</div>
+            <div className="caption">{sv.area.name}{sv.equipment ? ` · ${sv.equipment.variant || sv.equipment.kind}${sv.equipment.tag ? ` · ${sv.equipment.tag}` : ""}` : ""}</div>
           </div>
           <span className="tag" style={{ background: URGENCY_BG[s.severity], color: "#fff" }}>{s.severity}</span>
         </div>

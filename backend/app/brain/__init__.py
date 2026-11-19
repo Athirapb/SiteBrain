@@ -32,10 +32,12 @@ for _name in GROUPS:
     CONDITIONS.extend(getattr(_m, "CONDITIONS", []))
     CASES.extend(getattr(_m, "CASES", []))
 
-# Electrical and operational causes and checks shared by every equipment type (common.py)
-from . import common  # noqa: E402
+# Electrical and operational causes and checks shared by every equipment type (common.py), then the process causes:
+# the process around the machine, and what it handles (process.py)
+from . import common, process, variants  # noqa: E402
 
 common.extend(TREES)
+process.extend(TREES)
 
 
 # Adjustments learned from resolved sessions (app/learning.py); authored TREES are never modified.
@@ -43,10 +45,14 @@ LEARNED: dict[str, dict] = {}
 _EFFECTIVE: dict[str, dict] = {}
 
 
+_TYPED: dict[tuple, dict] = {}
+
+
 def set_learned(models: dict[str, dict]) -> None:
     LEARNED.clear()
     LEARNED.update(models)
     _EFFECTIVE.clear()
+    _TYPED.clear()
 
 
 def _apply(tree: dict, m: dict) -> dict:
@@ -61,14 +67,24 @@ def _apply(tree: dict, m: dict) -> dict:
     return t
 
 
-def tree_for(kind: str | None) -> dict:
-    """The tree the engine uses: authored knowledge, plus what resolved sessions taught it."""
-    k = kind if kind in TREES else "Machine"
+def _learned(k: str) -> dict:
     if k not in LEARNED:
         return TREES[k]
     if k not in _EFFECTIVE:
         _EFFECTIVE[k] = _apply(TREES[k], LEARNED[k])
     return _EFFECTIVE[k]
+
+
+def tree_for(kind: str | None, variant: str | None = None) -> dict:
+    """The tree the engine uses: authored knowledge, plus what resolved sessions taught it, shaped to the
+    equipment's type (variants.py) when it is known."""
+    k = kind if kind in TREES else "Machine"
+    v = variants.get(k, variant)
+    if not v:
+        return _learned(k)
+    if (k, v["id"]) not in _TYPED:
+        _TYPED[(k, v["id"])] = variants.apply(_learned(k), v)
+    return _TYPED[(k, v["id"])]
 
 
 def conditions_for(area_code: str | None) -> list[dict]:

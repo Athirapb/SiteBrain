@@ -12,6 +12,7 @@ os.environ["SITEBRAIN_ADMIN_EMAIL"] = "admin@test.local"
 os.environ["SITEBRAIN_ADMIN_PASSWORD"] = "admin-pass-123"
 os.environ["SITEBRAIN_MEDIA"] = "off"  # test_media_* switch it on with stand-ins for speech-to-text and vision
 os.environ["SITEBRAIN_SURVEY"] = "0"  # one check at a time; test_condition_survey_* switch the survey on
+os.environ["SITEBRAIN_CONTEXT"] = "off"  # straight to the checks; test_context_* switch the understanding step on
 
 import pytest
 from fastapi.testclient import TestClient
@@ -454,16 +455,17 @@ def test_an_operating_change_is_found(client):
     v = report(client, h, equipment_id="GPS-BUU-04|SLS|Decanter 2",
                description="decanter tripping since the night shift pushed the feed up")
     sid = v["session"]["id"]
-    v = diagnose(client, sid, h, limit=16, answers=[
+    v = diagnose(client, sid, h, limit=20, answers=[
         "Above design — pushed for more output", "Overload relay tripped", "Setpoint, speed or feed changed",
         "Yes, changed in the last few days", "Matches the nameplate", "Normal and balanced",
         "Comes and goes as the feed changes", "Yes, flushed before stopping", "Much thicker or thinner, or flow surging",
         "Torque hunting or tripping on high torque", "Quiet, oil clean and at level", "Yes, done to the checklist", "The usual few",
         "IR above 100 MΩ, terminals clean and tight", "Warm, below 80 °C, no smell", "Both high, same as SCADA",
         "Fresh grease, lubricator full and pumping", "Fresh, smooth solution; pump running steady",
-        "Firm dry cake, clear centrate", "Both below 75 °C"])
+        "Firm dry cake, clear centrate", "Both below 75 °C", "Feed changed — thicker, wetter or dirtier than usual"])
     tree = TREES["Decanter"]
-    assert v["rca"] and find_cause(tree, v["rca"]["cause"])["domain"] == "operational", v["rca"]
+    # a change in how it's run, or in the feed it gets from upstream: not a machine or electrical fault
+    assert v["rca"] and find_cause(tree, v["rca"]["cause"])["domain"] in ("operational", "process"), v["rca"]
 
 
 def diagnosis_state(sid):
@@ -1307,6 +1309,138 @@ def test_condition_survey_can_be_declined(client, survey_on):
     assert v["survey"] is None and v["checks"] == 0 and last_replies(v), "back to one check at a time"
     assert v["messages"][-2]["text"] == "Ask me one check at a time"
 
+
+# ---------------------------------------------------------------------------
+# Understanding the equipment before troubleshooting, equipment types, process causes
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def context_on(monkeypatch):
+    monkeypatch.setattr(config, "CONTEXT", True)
+
+
+def last_agent(v):
+    return next(m for m in reversed(v["messages"]) if m["type"] == "agent")
+
+
+def test_context_infers_and_confirms_the_type_then_checks_understanding(client, context_on):
+    from app import db
+    from app.diagnosis import CTX_DIFF, CTX_YES, TYPE_HOW
+    h = login(client, "operator1")
+    eq_id = "GPS-BUU-04|D4|D4 RC Pump 1"
+    v = report(client, h, equipment_id=eq_id, symptoms=["trip"], description="pump stopped, won't come back")
+    sid = v["session"]["id"]
+    assert v["phase"] == "context" and not any(m["type"] == "fishbone" for m in v["messages"]), \
+        "no troubleshooting before the equipment is understood"
+    ask = last_agent(v)
+    assert "rotary lobe pump" in ask["text"].lower() and ask["replies"][0] == "Rotary lobe pump", "the inferred type first"
+    assert {"Centrifugal pump", "Progressive cavity pump", TYPE_HOW, NOT_SURE} <= set(ask["replies"])
+
+    v = say(client, sid, TYPE_HOW, h)  # how to tell the types apart
+    assert any("stator" in x for x in last_agent(v)["items"])
+    v = say(client, sid, "Progressive cavity pump", h)
+    assert db.q1("SELECT variant FROM equipment WHERE id=?", (eq_id,))["variant"] == "pc", "the confirmed type is remembered"
+    assert any(m["type"] == "event" and "progressive cavity" in m["text"] for m in v["messages"])
+    und = last_agent(v)
+    assert und["replies"] == [CTX_YES, CTX_DIFF]
+    assert any(x.startswith("What it does: Recirculates") for x in und["items"]), "its role in the process"
+    assert any(x.startswith("Where it sits: Digesters") for x in und["items"]), "its place in the process flow"
+    assert any("rubber stator" in x for x in und["items"]), "how this type works"
+    assert "closed discharge valve" in (und.get("safety") or ""), "what must never be done to this type"
+
+    v = say(client, sid, CTX_DIFF, h)
+    v = say(client, sid, "It also feeds the heat exchanger before going back to the digester", h)
+    st = diagnosis_state(sid)
+    assert st["ctx"]["notes"] == ["It also feeds the heat exchanger before going back to the digester"]
+    assert "Won't start" in last_agent(v)["replies"], "then its state now"
+    v = say(client, sid, "Won't start", h)
+    assert "Right after maintenance or a change" in last_agent(v)["replies"], "then how it started"
+    v = say(client, sid, "Suddenly", h)
+    st = diagnosis_state(sid)
+    assert v["phase"] == "diagnose" and v["equipment"]["variant"] == "Progressive cavity pump"
+    assert any(m["type"] == "fishbone" for m in v["messages"])
+    causes = [c for b in v["fishbone"] for c in b["causes"]]
+    assert "v_stator" in {c["id"] for c in causes}, "the type's own causes are on the fishbone"
+    from app.brain import tree_for
+    from app.catalog import report_hint
+    from app.diagnosis import initial_posterior
+    tree = tree_for("Pump", "pc")
+    elec = {c["id"] for c in tree["causes"] if c.get("domain") == "electrical"}
+    before = initial_posterior(tree, report_hint(v["session"]["report"]), [])
+    assert sum(p for c, p in st["posterior"].items() if c in elec) > 1.5 * sum(p for c, p in before.items() if c in elec), \
+        "a pump that won't start points to the electrical side first"
+    assert "shutoff" not in st["asked"] and all("close the discharge valve" not in (m.get("text") or "")
+                                                for m in v["messages"]), "no shut-off test on a PD pump"
+
+    # next time the type is known: SiteBrain goes straight to its understanding
+    v = report(client, h, equipment_id=eq_id, symptoms=["noise"])
+    assert last_agent(v)["replies"] == [CTX_YES, CTX_DIFF]
+    assert any("Progressive cavity pump" in x for x in last_agent(v)["items"])
+
+
+def test_context_not_sure_of_the_type_goes_with_the_usual_one(client, context_on):
+    from app import db
+    from app.diagnosis import CTX_YES
+    h = login(client, "operator1")
+    eq_id = "GPS-BUU-04|D3|D3 Agitator 1"
+    v = report(client, h, equipment_id=eq_id, symptoms=["vibration"])
+    sid = v["session"]["id"]
+    assert last_agent(v)["replies"][0] == "Side-entry agitator"
+    v = say(client, sid, NOT_SURE, h)
+    assert "side-entry agitator for now" in last_agent(v)["text"]
+    assert db.q1("SELECT variant FROM equipment WHERE id=?", (eq_id,))["variant"] is None, "an assumption is not saved"
+    v = say(client, sid, "what does a side entry one look like?", h)  # a question: answered, the step stays open
+    assert v["phase"] == "context" and last_agent(v)["replies"] == [CTX_YES, "Something is different"]
+    for answer in (CTX_YES, "Running, but not right", NOT_SURE):
+        v = say(client, sid, answer, h)
+    assert v["phase"] == "diagnose" and last_replies(v), "troubleshooting starts with a check"
+
+
+def test_types_shape_the_fishbone_and_drop_unsafe_checks():
+    from app.brain import TREES, tree_for, variants
+    def checks(kind, t=None):
+        return {q["id"] for q in tree_for(kind, t)["questions"]}
+
+    def causes(kind, t=None):
+        return {c["id"] for c in tree_for(kind, t)["causes"]}
+    assert "shutoff" in checks("Pump", "centrifugal")
+    assert "shutoff" not in checks("Pump", "lobe") and "shutoff" not in checks("Pump", "pc"), "no shut-off test on PD pumps"
+    assert "v_stator" in causes("Pump", "pc") and "v_stator" not in causes("Pump")
+    assert {"gland", "mis"}.isdisjoint(causes("Agitator", "submersible")) and "v_subseal" in causes("Agitator", "submersible")
+    assert {"valve", "rings", "oilleak"}.isdisjoint(causes("Compressor", "screw"))
+    assert "v_airleak" in causes("Blower", "support_air") and "cond" not in causes("Blower", "support_air")
+    assert tree_for("Pump", "nonsense") is tree_for("Pump"), "an unknown type falls back to the kind's tree"
+    assert TREES["Pump"].get("variant") is None, "the authored tree is never changed"
+    lp = variants.infer({"name": "LP 3", "kind": "Compressor", "unit": "BUU"})
+    air = variants.infer({"name": "Plant Air Compressor 1", "kind": "Compressor", "unit": "SLS"})
+    assert lp[0]["id"] == "recip" and air[0]["id"] == "screw"
+    assert variants.infer({"name": "D1 Blower 2", "kind": "Blower", "unit": "D1"})[0]["id"] == "support_air"
+    assert variants.match("Pump", "it's a mono pump with a rubber stator")["id"] == "pc"
+
+
+def test_every_equipment_considers_process_causes():
+    from app.brain import TREES
+    for kind, tree in TREES.items():
+        assert any(c.get("domain") == "process" for c in tree["causes"]), kind
+        assert "p_conn" in {q["id"] for q in tree["questions"]}, f"{kind}: asks about the process around it"
+    pump = {c["id"]: c for c in TREES["Pump"]["causes"]}
+    assert pump["cav"]["domain"] == "process" and {"p_gas", "p_thick", "p_conn"} <= set(pump)
+    assert {"p_level", "p_foam"} <= {c["id"] for c in TREES["Agitator"]["causes"]}
+    assert "p_air" in {c["id"] for c in TREES["Membrane"]["causes"]}
+
+
+def test_a_process_cause_is_found_not_a_machine_fault(client):
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|D4|D4 Transfer Pump 1", symptoms=["flow"],
+               description="pump loses flow, the digestate is foaming")
+    sid = v["session"]["id"]
+    v = diagnose(client, sid, h, limit=16, answers=[
+        "Foamy or full of gas bubbles", "Low and fluctuating", "Flowing normally", "Smooth hum", "Level OK, oil clean",
+        "Coupling fine, bolts tight", "Nothing leaking", "Well above the minimum", "No change", "Normal and steady",
+        "Normal — supply and delivery as usual", "No, well below normal", "Yes, done to the checklist",
+        "The usual few", "Within the design window", "No change"])
+    finding = next(m for m in v["messages"] if m["type"] == "finding")
+    assert finding["direct_cause"].startswith("Gas or air in the suction"), finding["direct_cause"]
 
 # runs last: the migration replaces the users
 def test_v2_database_migrates_keeping_its_issues(client):

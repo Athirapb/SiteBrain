@@ -238,6 +238,7 @@ ALTER TABLE cases ADD COLUMN IF NOT EXISTS equipment TEXT;
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS doc_id INTEGER;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS checksum TEXT;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS equipment_kinds JSONB;  -- equipment types it covers; [] = general
+ALTER TABLE equipment ADD COLUMN IF NOT EXISTS variant TEXT;       -- its type within the kind, confirmed in the chat
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS tagged_by TEXT;      -- uploader | llm | keywords
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS summary TEXT;        -- one line, written by the LLM
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS project TEXT;            -- historic PIR / RCA reports (app/incidents.py)

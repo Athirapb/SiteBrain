@@ -72,6 +72,10 @@ VIB_STOP_MM_S = float(os.getenv("SITEBRAIN_VIB_STOP", "7.1"))
 # Present-condition check: how many field checks are asked together, as one form, before the one-at-a-time
 # follow-ups (0 or 1 = ask one check at a time from the start)
 SURVEY_SIZE = int(os.getenv("SITEBRAIN_SURVEY", "0"))
+# Before troubleshooting, SiteBrain makes sure it understands the equipment: confirms its type (inferred from its
+# name and area, then remembered), plays back its role in the process and how it works, and asks its state and how
+# the problem started. off = straight to the checks, on the type already recorded for the equipment.
+CONTEXT = os.getenv("SITEBRAIN_CONTEXT", "on").lower() not in ("off", "false", "0")
 
 # Learning from resolved sessions: authored likelihoods count as LEARN_STRENGTH sessions of prior evidence
 LEARNING = os.getenv("SITEBRAIN_LEARNING", "true").lower() == "true"

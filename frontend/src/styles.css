@@ -586,3 +586,4 @@ button.voice-panel:disabled { opacity: 0.5; cursor: not-allowed; }
 .domain-tag.electrical { background: var(--gps-orange-lgt); color: var(--gps-orange-dark); }
 .domain-tag.operational { background: var(--gps-info-lgt); color: var(--answer); }
 .domain-tag.instrument { background: var(--muted-surface); color: var(--t70); }
+.domain-tag.process { background: var(--gps-primary-lgt); color: var(--gps-green-dark); }

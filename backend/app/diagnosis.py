@@ -1,6 +1,8 @@
 """Diagnostic session engine (SRS §3 state machine): fishbone + 5-Why root cause analysis.
 
 Issue report → [localize: which equipment in the area?]
+  → UNDERSTAND: the equipment's type (inferred, confirmed by the operator, remembered), its role in the process flow
+    and how it works, played back for the operator to confirm or correct; then its state now and how it started
   → FISHBONE: field checks narrow the 6M direct causes (Man, Machine, Method, Material, Measurement, Environment)
     with a Bayesian update over the knowledge brain's decision tree, or the LLM following the same method
   → FINDING: the confirmed direct cause with immediate corrective actions
@@ -21,7 +23,7 @@ import re
 import zlib
 
 from . import config, db, escalation, knowledge, llm, media, safety, telemetry, topology
-from .brain import CATEGORY_LABEL, MAINTENANCE, conditions_for, find_cause, roots, tree_for
+from .brain import CATEGORY_LABEL, MAINTENANCE, conditions_for, find_cause, roots, tree_for, variants
 from .brain.dsl import is_normal_answer
 from .catalog import SEVERITIES, SYMPTOM_BY_ID, report_hint, report_summary, symptom_labels, symptoms_for
 
@@ -39,6 +41,10 @@ CLOSE_REPLY = "No issue found, close session"
 PERSISTS = "I applied the recommended steps but the issue persists."
 AGREE = "Yes, that's the cause"
 DISAGREE = "No, that's not it"
+TYPE_HOW = "How do I tell them apart?"
+CTX_YES = "Yes, that's right"
+CTX_DIFF = "Something is different"
+CTX_FINE = "Never mind, it's right"
 _AGREE_TEXT = re.compile(r"^(yes|yep|yeah|agree|i agree|correct|right|that'?s it|makes sense|ok|okay)\b", re.I)
 _DISAGREE_TEXT = re.compile(r"^(no|nope|not|disagree|i disagree|wrong|i don'?t think)\b", re.I)
 _NOT_SURE_TEXT = re.compile(r"\b(not sure|unsure|don'?t know|no idea|can'?t tell|whole area)\b", re.I)
@@ -81,6 +87,11 @@ def area_equipment(area_id: int) -> list[dict]:
 
 def session_eq(s: dict) -> dict | None:
     return load_eq(s["equipment_id"]) if s.get("equipment_id") else None
+
+
+def _tree(s: dict, eq: dict) -> dict:
+    """The knowledge-brain tree for this session's equipment, shaped to its type once that is known."""
+    return tree_for(eq["kind"], s["state"].get("variant"))
 
 
 def load_session(sid: str) -> dict:
@@ -355,7 +366,7 @@ def match_option(q: dict, text: str) -> int | None:
 _SPOKEN_HELPERS = [
     (re.compile(r"\b(can'?t|cannot|can not|unable|not able|no way to)\b.*\b(check|do|see|reach|get)\b|\bskip\b", re.I),
      [CANT, STEP_CANT, SKIP_WHY]),
-    (re.compile(r"\bhow (do|can|should) i\b|\bhow to\b|\bshow me how\b", re.I), [HOW, STEP_HOW]),
+    (re.compile(r"\bhow (do|can|should) i\b|\bhow to\b|\bshow me how\b", re.I), [HOW, STEP_HOW, TYPE_HOW]),
     (re.compile(r"\b(not sure|don'?t know|no idea|unsure|maybe)\b", re.I), [NOT_SURE, CANT]),
     (re.compile(r"\b(all (the )?steps|every step)\b", re.I), [ALL_STEPS]),
     (re.compile(r"\b(done|finished|completed|did it|that'?s done)\b", re.I), [DONE]),
@@ -601,7 +612,7 @@ def start_session(user: dict, project_id: int | None, area_id: int | None, equip
             description=description, author=user["name"], area=area["name"], equipment=eq["name"] if eq else None,
             project=project["name"])
     if eq:
-        _begin_diagnosis(s, area, eq)
+        _begin_context(s, area, eq, user)
     else:
         add_msg(sid, "analysis", text=f"Issue reported in {area['name']} without a specific equipment. "
                                       f"First, let's find which equipment it is.",
@@ -621,21 +632,238 @@ def start_session(user: dict, project_id: int | None, area_id: int | None, equip
     return load_session(sid)
 
 
+# ---------------------------------------------------------------------------
+# Understand before troubleshooting: type, process role and functioning, state now, how it started
+# ---------------------------------------------------------------------------
+
+_KIND_WORD = {"HWG": "hot water generator", "WAM": "separator", "Machine": "machine"}
+_WHY_GUESS = {"name": "going by its name", "area": "that's the usual type in {area}",
+              "usual": "that's the usual type for this duty here"}
+
+
+def _begin_context(s: dict, area: dict, eq: dict, user: dict | None = None) -> None:
+    """Equipment known: before any check, make sure SiteBrain understands it — which type it is (inferred, confirmed
+    by the operator and remembered on the equipment), what it does in the process and how it works (played back to
+    confirm or correct), what state it is in and how the problem started. Then the troubleshooting begins.
+    With SITEBRAIN_CONTEXT off it goes straight to the troubleshooting, on the type already recorded (if any)."""
+    st = s["state"]
+    st["flags"] = sorted(set(st.get("flags", [])) | safety.report_flags(s["report"], eq["kind"]))
+    known = variants.get(eq["kind"], eq.get("variant"))
+    if not config.CONTEXT or s["mode"] != "bot":
+        st["variant"] = known["id"] if known else None
+        _begin_diagnosis(s, area, eq)
+        return
+    guess, why = (known, "recorded") if known else variants.infer(eq)
+    st.update(phase="context", loc=None, variant=guess["id"] if guess else None,
+              ctx={"step": None, "guess": guess["id"] if guess else None, "why": why,
+                   "confirmed": why in ("recorded", "only") or bool(guess and guess["sure"] and why == "name")})
+    add_msg(s["id"], "analysis",
+            text=f"Thanks for reporting. Before we troubleshoot, let me make sure I understand {eq['name']} and where "
+                 "it sits in the process.",
+            safety_rules=[r["action"] for r in _rules_for(s, area, eq) if r["category"] == "advisory"])
+    _apply_safety(s, area, eq)
+    if guess and not st["ctx"]["confirmed"]:
+        _ask_type(s, area, eq, guess, why)
+    else:
+        _ask_understanding(s, area, eq)
+
+
+def _ask_type(s: dict, area: dict, eq: dict, guess: dict, why: str, lead: str = "") -> None:
+    vs = variants.variants(eq["kind"])
+    word = _KIND_WORD.get(eq["kind"], eq["kind"].lower())
+    reason = _WHY_GUESS.get(why, "").format(area=area["name"])
+    s["state"]["ctx"]["step"] = "type"
+    add_msg(s["id"], "agent", who="SiteBrain",
+            text=f"{lead} First, which type of {word} is {eq['name']}? I think it's a {guess['label'].lower()}"
+                 f"{' — ' + reason if reason else ''}.".strip(),
+            prompt=f"Which type of {word} is it?", how="\n".join(f"{v['label']}: {v['look']}" for v in vs),
+            purpose="The type decides which faults are possible and which checks are safe — a positive-displacement "
+                    "pump, for one, must never be run against a closed valve.",
+            replies=[guess["label"]] + [v["label"] for v in vs if v is not guess] + [TYPE_HOW, NOT_SURE])
+
+
+def _set_type(s: dict, eq: dict, v: dict, user: dict | None, confirmed: bool) -> None:
+    """Use this type for the session; when the operator confirmed it, remember it on the equipment."""
+    st = s["state"]
+    st["variant"] = v["id"]
+    st["ctx"]["confirmed"] = confirmed
+    if confirmed and eq.get("variant") != v["id"]:
+        db.update("equipment", "id", eq["id"], {"variant": v["id"]})
+        eq["variant"] = v["id"]
+        event(s["id"], f"{eq['name']} recorded as a {v['label'].lower()} — I'll remember it next time",
+              "tag-check-outline", "info")
+        who = user or {"name": s["report"].get("reported_by") or "Field operator", "role": "field_operator"}
+        db.audit(who["name"], who["role"], "equipment.type_confirmed", eq["id"], {"type": v["id"], "session": s["id"]},
+                 s["site_code"])
+
+
+def _process_line(eq: dict) -> str | None:
+    """Where the equipment sits in the process flow: what its process unit takes in and sends on."""
+    node = topology.node_of(eq)
+    if not node:
+        return None
+    ins = [f"{lab} from the {topology.NODES[a][0]}" for a, b, lab in topology.EDGES if b == node]
+    outs = [f"{lab} to the {topology.NODES[b][0]}" for a, b, lab in topology.EDGES if a == node]
+    parts = ([f"takes in {_join(ins)}"] if ins else []) + ([f"sends {_join(outs)}"] if outs else [])
+    return f"{topology.NODES[node][0]} — {'; '.join(parts)}" if parts else None
+
+
+def understanding(s: dict, eq: dict) -> list[str]:
+    """What SiteBrain understands about the equipment: role, place in the process, type and how it works, normal."""
+    v = variants.get(eq["kind"], s["state"].get("variant"))
+    items = [f"What it does: {variants.role(eq)}"]
+    where = _process_line(eq)
+    if where:
+        items.append(f"Where it sits: {where}.")
+    if v:
+        items.append(f"Type: {v['label']}. {v['works']}")
+        items.append(f"Normal: {'; '.join(v['normal'])}.")
+    elif MAINTENANCE.get(eq["kind"], {}).get("operating_limits"):
+        items.append("Normal: " + "; ".join(f"{a} {b}" for a, b in MAINTENANCE[eq["kind"]]["operating_limits"][:3]) + ".")
+    return items
+
+
+def _ask_understanding(s: dict, area: dict, eq: dict, lead: str = "") -> None:
+    v = variants.get(eq["kind"], s["state"].get("variant"))
+    s["state"]["ctx"]["step"] = "understand"
+    add_msg(s["id"], "agent", who="SiteBrain", items=understanding(s, eq),
+            text=f"{lead} Here's how I understand {eq['name']}. Is that right?".strip(),
+            prompt="Is that right?", purpose="Getting the setup right first means every check fits your equipment.",
+            safety=v["cautions"][0] if v and v["cautions"] else None, replies=[CTX_YES, CTX_DIFF])
+
+
+def _ask_state(s: dict, eq: dict, lead: str = "") -> None:
+    s["state"]["ctx"]["step"] = "state"
+    add_msg(s["id"], "agent", who="SiteBrain", text=f"{lead} What state is it in right now?".strip(),
+            prompt="What state is it in right now?",
+            purpose="Running badly, tripped or won't start point to very different causes.",
+            replies=[o[0] for o in variants.state_options(eq["kind"])] + [NOT_SURE])
+
+
+def _ask_onset(s: dict, lead: str = "") -> None:
+    s["state"]["ctx"]["step"] = "onset"
+    add_msg(s["id"], "agent", who="SiteBrain", text=f"{lead} And how did it start?".strip(), prompt="How did it start?",
+            purpose="A sudden fault, slow wear and a problem right after a change point to different causes.",
+            replies=[o[0] for o in variants.ONSET] + [NOT_SURE])
+
+
+def _pick(options: list[str], text: str) -> str | None:
+    """The option a reply means: exactly, or as matched from typed / spoken words."""
+    t = text.strip().lower()
+    hit = next((o for o in options if o.lower() == t), None)
+    return hit or next(iter(match_spoken(options, text)), None)
+
+
+def _correction(s: dict, eq: dict, text: str, user: dict | None) -> str:
+    """The operator corrected SiteBrain's understanding: note it for the troubleshooting (and the LLM), switch the
+    type if they named another one, and say what was taken on board."""
+    st = s["state"]
+    st["ctx"].setdefault("notes", []).append(text)
+    st.setdefault("notes", []).append({"text": f"Setup: {text}", "at": db.now_iso()})
+    v = variants.match(eq["kind"], text)
+    if v and v["id"] != st.get("variant"):
+        _set_type(s, eq, v, user, confirmed=True)
+        return f"Thanks — so it's a {v['label'].lower()}. I've switched to that."
+    if llm.available():
+        res = llm.complete_json(
+            "You are SiteBrain, a plant copilot. The field operator corrected your understanding of an equipment "
+            "before troubleshooting. In ONE short sentence, thank them and restate the corrected point in plain "
+            "words. No question, no emoji. JSON {\"reply\": str}.",
+            [{"role": "user", "content": "Your understanding:\n" + "\n".join(understanding(s, eq))
+                                         + f"\n\nTheir correction: {text}"}],
+            {"type": "object", "additionalProperties": False, "required": ["reply"],
+             "properties": {"reply": {"type": "string"}}}, max_tokens=200)
+        if (res or {}).get("reply", "").strip():
+            return res["reply"].strip()
+    return "Thanks — noted, I'll keep that in mind while we troubleshoot."
+
+
+def _context_turn(s: dict, text: str, user: dict | None) -> None:
+    """One answer while SiteBrain is getting to know the equipment."""
+    area, eq = load_area(s["area_id"]), session_eq(s)
+    st = s["state"]
+    ctx = st["ctx"]
+    step, t = ctx.get("step"), text.strip()
+    unsure = t.lower() == NOT_SURE.lower() or bool(_NOT_SURE_TEXT.search(t))
+    if step == "type":
+        vs = variants.variants(eq["kind"])
+        guess = variants.get(eq["kind"], ctx.get("guess")) or vs[0]
+        if t == TYPE_HOW:
+            add_msg(s["id"], "agent", who="SiteBrain", items=[f"{v['label']}: {v['look']}" for v in vs],
+                    text="Here's how to tell them apart. Which one is it?", prompt="Which type is it?",
+                    replies=[v["label"] for v in vs] + [NOT_SURE])
+            return
+        v = variants.match(eq["kind"], t)
+        if not v and not unsure and _AGREE_TEXT.match(t) and not _is_question(t):
+            v = guess  # "yes" to the guess
+        if not v and not unsure:
+            v = variants.get(eq["kind"], next((x["id"] for x in vs if x["label"] == _pick([x["label"] for x in vs], t)),
+                                              None))
+        if v:
+            _set_type(s, eq, v, user, confirmed=True)
+            _ask_understanding(s, area, eq, lead=_vary(s, ["Great.", "Thanks.", "Good."], "type"))
+        elif unsure:
+            _set_type(s, eq, guess, user, confirmed=False)
+            _ask_understanding(s, area, eq, lead=f"No problem — I'll go with {guess['label'].lower()} for now; tell me "
+                                                 "any time if it turns out different.")
+        else:
+            add_msg(s["id"], "agent", who="SiteBrain", text="I couldn't match that to a type. Pick one below, or "
+                    "Not sure.", prompt="Which type is it?", replies=[v["label"] for v in vs] + [TYPE_HOW, NOT_SURE])
+        return
+    if step == "understand":
+        if t == CTX_YES or (t != CTX_DIFF and _AGREE_TEXT.match(t) and len(t.split()) <= 4):
+            _ask_state(s, eq, lead=_vary(s, ["Good.", "Great, thanks.", "Perfect."], "ctx"))
+        elif t == CTX_DIFF or (_DISAGREE_TEXT.match(t) and len(t.split()) <= 4):
+            ctx["step"] = "correct"
+            add_msg(s["id"], "agent", who="SiteBrain",
+                    text="What's different? Tell me in a line — what feeds it or what it feeds, its type or drive, or "
+                         "its normal readings.", prompt="What's different?", replies=[CTX_FINE])
+        else:
+            _ask_state(s, eq, lead=_correction(s, eq, t, user))
+        return
+    if step == "correct":
+        _ask_state(s, eq, lead="Okay." if t == CTX_FINE else _correction(s, eq, t, user))
+        return
+    if step == "state":
+        ctx["state"] = None if unsure else _pick([o[0] for o in variants.state_options(eq["kind"])], t)
+        if not ctx["state"] and not unsure:
+            ctx.setdefault("notes", []).append(t)  # their own words: kept for the troubleshooting
+        _ask_onset(s, lead="Got it.")
+        return
+    if step == "onset":
+        ctx["onset"] = None if unsure else _pick([o[0] for o in variants.ONSET], t)
+        if not ctx["onset"] and not unsure:
+            ctx.setdefault("notes", []).append(t)
+        ctx.update(step=None, done=True)
+        _begin_diagnosis(s, area, eq)
+
+
 def _begin_diagnosis(s: dict, area: dict, eq: dict) -> None:
-    """Equipment known: set the prior from the report and past cases, apply safety, ask the first check."""
-    tree = tree_for(eq["kind"])
+    """Equipment understood: set the prior from the report, the clarifying answers and past cases, apply safety,
+    ask the first check."""
+    tree = _tree(s, eq)
     hint = report_hint(s["report"])
     matched = knowledge.match_cases(eq["kind"], hint, s["site_code"])
     st = s["state"]
-    st.update(phase="diagnose", loc=None, posterior=initial_posterior(tree, hint, matched))
+    ctx = st.get("ctx") or {}
+    post = initial_posterior(tree, hint, matched)
+    picked = [o for o in variants.state_options(eq["kind"]) if o[0] == ctx.get("state")] + \
+             [o for o in variants.ONSET if o[0] == ctx.get("onset")]
+    if picked:
+        post = variants.reweigh(tree, post, picked)
+    st.update(phase="diagnose", loc=None, posterior=post)
     st["flags"] = sorted(set(st.get("flags", [])) | safety.report_flags(s["report"], eq["kind"]))
     s["causes"] = causes_view(tree, st["posterior"], [])
     s["confidence"] = s["causes"][0]["likelihood"] if s["causes"] else 0.0
     top = matched[0] if matched else None
+    understood = bool(ctx.get("done"))
     add_msg(s["id"], "analysis",
-            text="Thanks for reporting. Let's solve it together. Below are the possible causes — a few quick checks "
-                 "will narrow them down.",
-            safety_rules=[r["action"] for r in _rules_for(s, area, eq) if r["category"] == "advisory"],
+            text=("Thanks, that's clear. Here are the possible causes — machine, process, electrical and operating — "
+                  "and a few quick checks will narrow them down." if understood else
+                  "Thanks for reporting. Let's solve it together. Below are the possible causes — a few quick checks "
+                  "will narrow them down."),
+            safety_rules=[] if understood else
+            [r["action"] for r in _rules_for(s, area, eq) if r["category"] == "advisory"],
             similar=({"id": top["id"], "title": top["title"], "sim": top["sim"]} if top and top["sim"] > 40 else None))
     add_msg(s["id"], "fishbone", problem=_problem(s, eq), bones=fishbone(tree, st["posterior"], []))
     _apply_safety(s, area, eq)
@@ -653,7 +881,7 @@ def _first_question(s: dict, area: dict, eq: dict) -> None:
         if _llm_bot_turn(s, area, eq, None):
             return
         _note_llm_fallback(s)
-    tree = tree_for(eq["kind"])
+    tree = _tree(s, eq)
     st = s["state"]
     q = pick_question(tree, st["posterior"], st["asked"], report_hint(s["report"]))
     st["pending"] = None
@@ -667,7 +895,7 @@ def _ask_survey(s: dict, area: dict, eq: dict) -> bool:
     if config.SURVEY_SIZE < 2:
         return False
     st = s["state"]
-    qs = pick_survey(tree_for(eq["kind"]), st["posterior"], st["asked"], report_hint(s["report"]), config.SURVEY_SIZE)
+    qs = pick_survey(_tree(s, eq), st["posterior"], st["asked"], report_hint(s["report"]), config.SURVEY_SIZE)
     qs = by_likely_cause(qs, st["posterior"])  # asked one at a time, most likely cause first
     if len(qs) < 2:
         return False
@@ -697,7 +925,7 @@ def answer_survey(sid: str, user: dict, answers: dict[str, list[str]], skipped: 
     if s["mode"] != "bot" or not st.get("survey"):
         raise SessionError("No condition check is waiting for answers", 409)
     area, eq = load_area(s["area_id"]), session_eq(s)
-    tree = tree_for(eq["kind"])
+    tree = _tree(s, eq)
     qs = [q for qid in st["survey"] for q in tree["questions"] if q["id"] == qid]
     answers = {k: [a.strip().lower() for a in v or [] if a and a.strip()] for k, v in (answers or {}).items()}
     skipped = set(skipped or [])
@@ -841,7 +1069,7 @@ def _set_equipment(s: dict, area: dict, eq: dict, how: str) -> None:
     # area-level interlocks raised by the report now belong to the equipment
     db.ex("UPDATE interlocks SET equipment_id=? WHERE session_id=? AND equipment_id IS NULL", (eq["id"], s["id"]))
     event(s["id"], f"Issue localized to {eq['name']} ({eq['kind']}) · {how}", "map-marker-check-outline", "info")
-    _begin_diagnosis(s, area, eq)
+    _begin_context(s, area, eq)
 
 
 def _localize_turn(s: dict, text: str) -> str | None:
@@ -918,7 +1146,7 @@ def send(sid: str, text: str, user: dict, choices: list[str] | None = None, file
         return load_session(sid)
 
     if phase == "localize":
-        if _is_question(text):
+        if _is_question(text) and not _offered(s, text):
             _side_turn(s, text)
             save_session(s)
             return load_session(sid)
@@ -928,8 +1156,18 @@ def send(sid: str, text: str, user: dict, choices: list[str] | None = None, file
         save_session(s)
         return load_session(sid)
 
+    if phase == "context":  # getting to know the equipment: its buttons first, then questions, then answers
+        buttons = {TYPE_HOW, CTX_YES, CTX_DIFF, CTX_FINE, NOT_SURE} | {v["label"] for v in variants.variants(
+            (session_eq(s) or {}).get("kind"))}
+        if text not in buttons and _is_question(text):
+            _side_turn(s, text)
+        else:
+            _context_turn(s, text, user)
+        save_session(s)
+        return load_session(sid)
+
     if phase == "why":
-        if _is_question(text):
+        if _is_question(text) and not _offered(s, text):
             _side_turn(s, text)
         else:
             _why_turn(s, text)
@@ -970,7 +1208,7 @@ def send(sid: str, text: str, user: dict, choices: list[str] | None = None, file
         save_session(s)
         return load_session(sid)
 
-    if st.get("pending") and _is_question(text) and s["engine"] == "rules":
+    if st.get("pending") and _is_question(text) and s["engine"] == "rules" and not _offered(s, text):
         _side_turn(s, text)  # a question about the current check is not an answer, and not a diagnostic turn
         save_session(s)
         return load_session(sid)
@@ -1001,6 +1239,12 @@ def _is_question(text: str) -> bool:
     return t.endswith("?") or bool(_QUESTION.match(t))
 
 
+def _offered(s: dict, text: str) -> bool:
+    """The reply is one of the answers on screen (a tap), even if it reads like a question ("What it …")."""
+    p = _last_prompt(s["id"])
+    return bool(p) and text.strip().lower() in {r.lower() for r in p.get("replies") or []}
+
+
 # Messages that open a new stage: a question asked before one of them is no longer waiting for an answer
 _STAGE_BREAKS = {"analysis", "survey", "finding", "solution", "escalation"}
 
@@ -1028,6 +1272,10 @@ def _side_system(s: dict, area: dict, eq: dict | None, prompt: dict | None) -> s
         "ask a new check and do NOT repeat the pending question — SiteBrain repeats it after your reply.",
         "",
         f"EQUIPMENT: {eq['name'] + ' (' + eq['kind'] + ')' if eq else 'not identified yet'} in {area['name']}",
+        *([f"TYPE: {v['label']} — {v['works']}"] if (v := variants.get(eq["kind"] if eq else None,
+                                                                      st.get("variant"))) else []),
+        *([f"SETUP NOTES FROM THE OPERATOR: {' | '.join(st['ctx']['notes'])}"] if (st.get("ctx") or {}).get("notes")
+          else []),
         f"REPORTED: {s['symptom']} — severity {rep.get('severity')}",
         f"STAGE: {st.get('phase') or 'diagnose'}",
     ]
@@ -1278,7 +1526,7 @@ def _fix_turn(s: dict, text: str, user: dict) -> dict:
 
 
 def _rules_bot_turn(s: dict, area: dict, eq: dict, text: str, choices: list[str] | None = None) -> None:
-    tree = tree_for(eq["kind"])
+    tree = _tree(s, eq)
     st = s["state"]
     post = st["posterior"]
     before = dict(post)
@@ -1502,7 +1750,7 @@ def _match_branch(node: dict, text: str) -> int | None:
 
 def _why_turn(s: dict, text: str) -> None:
     area, eq = load_area(s["area_id"]), session_eq(s)
-    tree = tree_for(eq["kind"])
+    tree = _tree(s, eq)
     st = s["state"]
     rca = st["rca"]
     cause = find_cause(tree, rca["cause"])
@@ -1536,7 +1784,7 @@ def _why_turn(s: dict, text: str) -> None:
 
 def _llm_why_fallback(s: dict, area: dict, eq: dict) -> None:
     """The LLM confirmed a direct cause, then became unavailable: continue on the matching knowledge-brain cause."""
-    tree = tree_for(eq["kind"])
+    tree = _tree(s, eq)
     rca = s["state"]["rca"]
     want = set(knowledge.tokenize(rca["direct_cause"]))
     best = max(tree["causes"], key=lambda c: len(want & set(knowledge.tokenize(c["label"]))) / (len(want) or 1))
@@ -1660,12 +1908,26 @@ def _why_outline(node, depth: int = 0) -> list[str]:
 
 
 def knowledge_context(s: dict, area: dict, eq: dict) -> str:
-    tree = tree_for(eq["kind"])
+    tree = _tree(s, eq)
     topo = topology.context_for(eq)
     rep = s["report"]
+    v = variants.get(eq["kind"], s["state"].get("variant"))
+    ctx = s["state"].get("ctx") or {}
     lines = [
-        f"EQUIPMENT: {eq['name']} | Area: {area['name']} | Type: {eq['kind']} | Site: {s['site_code']}",
-        f"PROCESS TOPOLOGY: {topo['path']}",
+        f"EQUIPMENT: {eq['name']} | Area: {area['name']} | Kind: {eq['kind']} | Site: {s['site_code']}",
+        f"ROLE IN THE PROCESS: {variants.role(eq)}",
+        f"PROCESS TOPOLOGY: {topo['path']}" + (f" | {_process_line(eq)}" if _process_line(eq) else ""),
+    ]
+    if v:
+        lines += [f"EQUIPMENT TYPE: {v['label']} ({'confirmed by the field operator' if ctx.get('confirmed') else 'assumed — not confirmed'}). "
+                  f"How it works: {v['works']} Normal: {'; '.join(v['normal'])}."]
+        lines += [f"NEVER: {c}" for c in v["cautions"]]
+    if ctx.get("notes"):
+        lines.append("FIELD OPERATOR'S CORRECTIONS / NOTES ON THE SETUP (trust these over the above): "
+                     + " | ".join(ctx["notes"]))
+    if ctx.get("state") or ctx.get("onset"):
+        lines.append(f"STATE NOW: {ctx.get('state') or 'not given'} | HOW IT STARTED: {ctx.get('onset') or 'not given'}")
+    lines += [
         f"ISSUE REPORTED BY FIELD OPERATOR ({rep.get('reported_by')}, {rep.get('reported_at')}):",
         f"- Symptoms: {', '.join(rep.get('symptom_labels') or []) or 'none selected'}",
         f"- Severity (field operator's assessment): {rep.get('severity')}",
@@ -1716,7 +1978,9 @@ def transcript(sid: str) -> list[dict]:
             out.append({"role": "user", "content": " ".join(x for x in [m["text"], f"[attached: {files}]" if files else "",
                                                                         read] if x)})
         elif m["type"] == "agent":
-            out.append({"role": "assistant", "content": (f"{m.get('who')}: " if m.get("expert") else "") + m["text"]})
+            items = "".join(f"\n- {x}" for x in m.get("items") or [])
+            out.append({"role": "assistant", "content": (f"{m.get('who')}: " if m.get("expert") else "") + m["text"]
+                                                        + items})
         elif m["type"] == "finding":
             out.append({"role": "assistant", "content": f"Direct cause found: {m['direct_cause']} [{m.get('category')}]. "
                                                         f"Immediate actions: {'; '.join(m.get('steps') or [])}"})
@@ -1754,11 +2018,17 @@ def _bot_system(s: dict, area: dict, eq: dict) -> str:
         "METHOD",
         "- The field operator does not decide what to do next: YOU direct them. They follow your instruction and "
         "report what they found.",
-        "- Consider every kind of cause, not only mechanical ones: ELECTRICAL (supply / lost phase, motor winding or "
+        "- Consider every kind of cause, not only mechanical ones: PROCESS (what the equipment handles and the "
+        "process around it — feed solids / viscosity / grit / fibre, foam or gas in the liquid, tank level, gas "
+        "holder level and suction pressure, gas quality CH4 / O2 / H2S / moisture, temperature, upstream equipment "
+        "starving it or downstream restricting it), ELECTRICAL (supply / lost phase, motor winding or "
         "insulation, starter / VFD, protection settings, controls and interlocks) and OPERATIONAL (run outside its "
         "design duty, start-up / line-up not to the SOP, a recent operating change, too many starts or trip resets). "
         "The fishbone below includes them; a trip, a won't-start, a hot or smelling motor, or a problem that began "
-        "after a change points there first.",
+        "after a change points to electrical / operational first; a problem that follows the feed, the level, the gas "
+        "or the weather points to the process. Use STATE NOW and HOW IT STARTED.",
+        "- Fit every check to the EQUIPMENT TYPE and how it works: never ask for a check that doesn't exist on that "
+        "type or is unsafe on it (see NEVER), and trust the operator's corrections about the setup.",
         "- stage 'fishbone': every turn, `reply` acknowledges the last answer and says what it means (no question, "
         "no list of options). `instruction` is ONE concrete physical check, written as a direction ending in what to "
         "report, e.g. \"With the pump isolated under LOTO, look at the seal face: is it scored or chipped?\". It is the "
@@ -1815,7 +2085,7 @@ def _llm_repeats_check(s: dict, eq: dict, instruction: str, results: list[str]) 
     for the same temperature)."""
     st = s["state"]
     said = {r.lower() for r in results}
-    for q in tree_for(eq["kind"])["questions"]:
+    for q in _tree(s, eq)["questions"]:
         if q["id"] in st.get("asked", []) and len(said & {o["label"].lower() for o in q["options"]}) >= 2:
             return True
     new_q, new_r = _check_words(instruction), _check_words(" ".join(results))
@@ -1841,7 +2111,7 @@ def _llm_check(s: dict, area: dict, eq: dict, data: dict) -> None:
         # the same check as a decision-tree one (the LLM is shown them with their answers): record it as asked, so a
         # decision-tree turn during an LLM outage reads the answer against it and never asks it again
         said = {r.lower() for r in results}
-        same = next((q for q in tree_for(eq["kind"])["questions"]
+        same = next((q for q in _tree(s, eq)["questions"]
                      if len(said & {o["label"].lower() for o in q["options"]}) >= 2), None)
         st["pending"] = same["id"] if same else None
         if same and same["id"] not in st["asked"]:
@@ -1851,7 +2121,7 @@ def _llm_check(s: dict, area: dict, eq: dict, data: dict) -> None:
                 purpose=data.get("purpose"), how=data.get("how"), multi=True,
                 replies=results[:4] + ([HOW] if data.get("how") else []) + [CANT])
         return
-    tree = tree_for(eq["kind"])
+    tree = _tree(s, eq)
     q = pick_question(tree, st["posterior"], st["asked"], report_hint(s["report"])) if st.get("posterior") else None
     if q:
         st["asked"].append(q["id"])  # the LLM sees the answer in the transcript; don't ask this check twice
@@ -2004,7 +2274,8 @@ def save_files(sid: str, user: dict, attachments: list[dict]) -> list[dict]:
 
 
 # helper replies that are not observations a photo or a voice note could show
-_NOT_OBSERVATIONS = {HOW, CANT, NOT_SURE, SKIP_WHY, AGREE, DISAGREE, DONE, STEP_HOW, STEP_CANT, ALL_STEPS, WORKING, NOT_WORKING, CLOSE_REPLY}
+_NOT_OBSERVATIONS = {HOW, CANT, NOT_SURE, SKIP_WHY, AGREE, DISAGREE, DONE, STEP_HOW, STEP_CANT, ALL_STEPS, WORKING, NOT_WORKING,
+                     CLOSE_REPLY, TYPE_HOW, CTX_FINE}
 
 
 def _media_context(s: dict, check_id: str | None) -> tuple[str, dict | None]:
@@ -2015,7 +2286,7 @@ def _media_context(s: dict, check_id: str | None) -> tuple[str, dict | None]:
     ctx = (f"{eq['name']} ({eq['kind']}) in {area['name']}" if eq else f"somewhere in {area['name']}") + \
           f"; reported: {s['symptom'] or 'an abnormal condition'}; severity {rep.get('severity') or s['severity']}"
     if check_id and eq:
-        q = next((q for q in tree_for(eq["kind"])["questions"] if q["id"] == check_id), None)
+        q = next((q for q in _tree(s, eq)["questions"] if q["id"] == check_id), None)
         return ctx, ({"text": q["text"], "options": [o["label"] for o in q["options"]]} if q else None)
     if s["state"].get("phase") in ("fix", "verify") or s["state"].get("survey"):
         return ctx, None
@@ -2039,7 +2310,7 @@ def share_files(sid: str, user: dict, text: str, files: list[dict], caption: str
         ctx, question = _media_context(s, check_id)
         tq = None
         if check_id and session_eq(s):
-            tq = next((q for q in tree_for(session_eq(s)["kind"])["questions"] if q["id"] == check_id), None)
+            tq = next((q for q in _tree(s, session_eq(s))["questions"] if q["id"] == check_id), None)
         for f, a in zip(files, raw):
             res = media.analyze(a, ctx, question)
             if res and tq and res.get("kind") == "audio" and res.get("english"):
