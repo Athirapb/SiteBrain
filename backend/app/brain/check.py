@@ -23,8 +23,9 @@ def check_structure(kind: str, tree: dict) -> list[str]:
     ids = [c["id"] for c in tree["causes"]]
     if len(set(ids)) != len(ids):
         err.append("duplicate cause ids")
-    if not 3 <= len(ids) <= 9:
-        err.append(f"{len(ids)} direct causes (want 3–9)")
+    own = [c for c in tree["causes"] if c["id"][:2] not in ("e_", "o_")]  # the shared ones are linted in common.py
+    if not 3 <= len(own) <= 9:
+        err.append(f"{len(own)} direct causes of its own (want 3–9)")
     qids = [q["id"] for q in tree["questions"]]
     if len(set(qids)) != len(qids):
         err.append("duplicate question ids")
@@ -91,7 +92,8 @@ def check_structure(kind: str, tree: dict) -> list[str]:
 
 def simulate(tree: dict, cause: dict, hinted: bool = True) -> tuple[bool, int, str]:
     """(confirmed correctly, turns used, what happened)."""
-    from ..diagnosis import _answer_lik, clear_leader, initial_posterior, pick_question, real_causes, update_posterior
+    from ..diagnosis import clear_leader, initial_posterior, pick_question, real_causes, update_posterior
+    from .dsl import is_normal_answer
 
     hint = " ".join(cause["keys"]) if hinted else ""
     post = initial_posterior(tree, hint, [])
@@ -109,10 +111,14 @@ def simulate(tree: dict, cause: dict, hinted: bool = True) -> tuple[bool, int, s
             return False, turn, f"no clear cause after all checks (best {top} at {real[top]:.0%})"
         turn += 1
 
-        def strength(i):  # the answer this cause is most likely to show, compared with the other causes
-            others = [_answer_lik(q, i, x) for x in ids if x != cause["id"]]
-            return _answer_lik(q, i, cause["id"]) / (sum(others) / len(others))
-        post = update_posterior(post, q, [max(range(len(q["options"])), key=strength)])
+        # a typical case: the check shows the abnormal reading this cause clearly predicts (multiplier ≥ 1.5), else
+        # it reads healthy
+        mult = [o["lik"].get(cause["id"], 1.0) for o in q["options"]]
+        healthy = [i for i, o in enumerate(q["options"]) if is_normal_answer(o["label"])]
+        pick = max(range(len(mult)), key=lambda i: mult[i])
+        if mult[pick] < 1.5 and healthy:
+            pick = max(healthy, key=lambda i: mult[i])
+        post = update_posterior(post, q, [pick])
         asked.append(q["id"])
         real = real_causes(post)
         top = max(real, key=real.get)
@@ -123,12 +129,14 @@ def simulate(tree: dict, cause: dict, hinted: bool = True) -> tuple[bool, int, s
 def check_normal_options(tree: dict) -> list[str]:
     """A "normal" reading must not count as evidence for a cause the check doesn't test: among the causes the
     check says nothing about (no option above 1.5), P(normal | cause) should be about the same."""
-    from ..diagnosis import _answer_lik, is_normal_answer
+    from ..diagnosis import _answer_lik
+    from .dsl import is_normal_answer
 
     warn = []
     ids = [c["id"] for c in tree["causes"]]
     for q in tree["questions"]:
-        untested = [c for c in ids if max(o["lik"].get(c, 1.0) for o in q["options"]) < 1.5]
+        untested = [c for c in ids if max(o["lik"].get(c, 1.0) for o in q["options"]) < 1.5
+                    and c[:2] not in ("e_", "o_")]  # shared causes favour healthy mechanical readings on purpose
         if len(untested) < 2:
             continue
         for i, o in enumerate(q["options"]):

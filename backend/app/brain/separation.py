@@ -494,7 +494,7 @@ TREES["WAM"] = {
                   prevent=["Specify a low-pressure wash for screens in the cleaning SOP; train the crew"])),
           ], how="Look at the tear: a clean cut or dent suggests a foreign object; thin worn mesh suggests age."),
           case="KB-0215"),
-        C("drive", "Gearmotor or electrical fault", "Machine", ["trip", "current", "motor", "gearbox", "noise"], [
+        C("drive", "Gearmotor failure — gearbox wear or oil starvation", "Machine", ["gearbox", "noise", "gearmotor"], [
             "Isolate the gearmotor at the MCC and apply LOTO",
             "Check gearbox oil level and condition; listen for bearing noise on a hand turn",
             "Have the electrician check phase currents, insulation and the overload setting",
@@ -503,9 +503,6 @@ TREES["WAM"] = {
               B("Gearbox oil low or old", R(
                   "Gearmotor oil level and changes not in PM", "Method",
                   prevent=["Add gearmotor oil level to weekly rounds; change oil per OEM hours"])),
-              B("Water in motor terminal box", R(
-                  "Washdown water reaches the motor; glands not sealed", "Environment",
-                  prevent=["Fit proper cable glands; shield the motor from wash spray"])),
               B("Repeated overloads from plugging", R(
                   "No torque / current alarm before the overload trip", "Measurement",
                   prevent=["Add a high-current warning on SCADA below the trip setting"])),

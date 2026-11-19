@@ -580,3 +580,9 @@ button.voice-panel:disabled { opacity: 0.5; cursor: not-allowed; }
 .search-select-opt.on { color: var(--gps-green-dark); font-weight: 600; }
 .search-select-opt.disabled { color: var(--t30); cursor: not-allowed; }
 .search-select-empty { padding: 12px 10px; font-size: 13px; color: var(--t50); text-align: center; }
+
+/* cause chart: discipline tags */
+.domain-tag { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding: 0 6px; border-radius: var(--pill); font-size: 10px; font-weight: 600; vertical-align: middle; white-space: nowrap; }
+.domain-tag.electrical { background: var(--gps-orange-lgt); color: var(--gps-orange-dark); }
+.domain-tag.operational { background: var(--gps-info-lgt); color: var(--answer); }
+.domain-tag.instrument { background: var(--muted-surface); color: var(--t70); }

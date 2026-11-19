@@ -394,6 +394,10 @@ export function Reading({ a, name }) {
 }
 
 // Possible causes as one list, most likely first (the 6M structure stays in the engine)
+// Electrical and operating causes are tagged, so the operator sees they are being considered alongside mechanical ones
+const DOMAIN_TAG = { electrical: ["Electrical", "flash"], operational: ["Operational", "account-hard-hat"],
+                     instrument: ["Instrument", "gauge"] };
+
 function CausesCard({ bones, first }) {
   const all = (bones || []).flatMap((b) => b.causes)
     .sort((a, b) => (a.ruled_out - b.ruled_out) || b.likelihood - a.likelihood).slice(0, 6);
@@ -404,7 +408,9 @@ function CausesCard({ bones, first }) {
       <div className="overline">{first ? "Possible causes (initial analysis)" : "Possible causes · updated"}</div>
       {all.map((c) => (
         <div key={c.label} className={`cause-row ${c.ruled_out ? "out" : c === top ? "top" : ""}`}>
-          <span className="cause-label">{c.label}{c.ruled_out && <span className="caption"> · ruled out</span>}</span>
+          <span className="cause-label">{c.label}
+            {DOMAIN_TAG[c.domain] && <span className={`domain-tag ${c.domain}`}><Icon name={DOMAIN_TAG[c.domain][1]} size={12} />{DOMAIN_TAG[c.domain][0]}</span>}
+            {c.ruled_out && <span className="caption"> · ruled out</span>}</span>
           {!c.ruled_out && <span className="cause-bar"><span style={{ width: `${Math.max(4, Math.round(c.likelihood * 100))}%` }} /></span>}
           <span className="cause-pct">{c.ruled_out ? "" : `${Math.round(c.likelihood * 100)}%`}</span>
         </div>

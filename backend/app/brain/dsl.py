@@ -18,6 +18,8 @@ Likelihoods: 1.0 = the answer says nothing about that cause; >1 makes it more li
 <1 makes it less likely (0.2–0.4 = nearly rules it out).
 """
 
+import re
+
 from .. import config
 
 # Vibration limits for rotary machines (pumps, agitators, blowers, fans, shredders, screws): site-configurable
@@ -72,3 +74,22 @@ def depth(node) -> int:
     if not node or node["type"] == "root":
         return 0
     return 1 + max(depth(b["then"]) for b in node["branches"])
+
+
+# Answers that describe a healthy reading (most field checks read like this, whatever the fault)
+_NORMAL_START = re.compile(
+    r"^(normal|ok\b|fine(?! black| but)|good|clean|intact|smooth|stable|nothing|none\b|clear|tight|correct|"
+    r"steady(?! climb| stream)|within (design|life|schedule|the normal)|no (change|dust|lockouts|unusual|work)|"
+    r"dry(,|$)|tube matches|both agree|all (open|normal)|as usual|level ok|flow good|flowing normally|belts? |"
+    r"coupling fine|sharp|fresh|moves smoothly|yes, reaches|recently|0% lel|centred|quiet|even|same\b|at setpoint|"
+    r"uniform|a little, as usual|slight weep|moving evenly|below 70|both below|< ?10 ppm|2–5°c|above 95|agrees within|"
+    r"level 60|reads correctly|they agree|starts and runs normally|cycles normally|it does not trip|in service|"
+    r"just the usual|usual -|firm dry cake|full, even spray|brush intact|oil level ok|one running, normal|"
+    r"louvres open|inlet below 40|supply cold|o2 3–6|δt normal|yes — pot empty|yes, flows freely|yes, flushed|"
+    r"no, same|100% perimeter|well above the minimum|closed and locked|no trip|warm, below|ir above|"
+    r"within the design|yes, done to|the usual few|matches the nameplate)", re.I)
+
+
+def is_normal_answer(label: str) -> bool:
+    """An answer that describes a healthy reading (most field checks read like this, whatever the fault)."""
+    return bool(_NORMAL_START.match(label.strip()))

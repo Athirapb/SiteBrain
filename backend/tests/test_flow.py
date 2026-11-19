@@ -379,7 +379,7 @@ def test_all_normal_readings_end_in_no_fault_found_never_silence(client):
     h = login(client, "operator1")
     v = report(client, h, equipment_id="GPS-BUU-04|BUU|Cooling Water Pump 2", description="pump sounds a bit different")
     sid = v["session"]["id"]
-    for _ in range(15):  # every check reads healthy
+    for _ in range(30):  # every check reads healthy
         if v["phase"] != "diagnose":
             break
         replies = last_replies(v)
@@ -417,6 +417,53 @@ def test_vibration_limits_come_from_one_setting():
     from app.brain import TREES
     noise = next(q for q in TREES["Pump"]["questions"] if q["id"] == "noise")
     assert noise["contradiction"]["above"] == config.VIB_ALERT_MM_S == 2.8 and config.VIB_STOP_MM_S == 7.1
+
+
+def test_every_machine_considers_electrical_and_operational_causes():
+    from app.brain import TREES, find_cause
+    from app.brain.common import E, MOTOR_KINDS, O
+    for kind in MOTOR_KINDS:
+        ids = {c["id"] for c in TREES[kind]["causes"]}
+        assert {"e_supply", "e_motor", "e_drive", "e_control"} <= ids and "o_sop" in ids, kind
+    pump = TREES["Pump"]
+    assert "elec" not in {c["id"] for c in pump["causes"]}, "the catch-all electrical cause is split up"
+    assert find_cause(pump, "elec")["id"] == "e_drive", "sessions that began before the split still resolve"
+    assert {c["id"] for c in TREES["Scrubber"]["causes"]} & set(E + O) == {"o_duty", "o_sop", "o_change"}
+    assert {c["domain"] for c in pump["causes"]} >= {"mechanical", "electrical", "operational"}
+    assert {"e_fault", "e_megger", "o_change", "o_sop"} <= {q["id"] for q in pump["questions"]}
+
+
+def test_a_supply_fault_is_found_not_a_mechanical_one(client):
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|D2|D2 Transfer Pump 1",
+               description="pump keeps tripping and the motor is humming loudly")
+    sid = v["session"]["id"]
+    assert any(c.get("domain") == "electrical" for b in v["fishbone"] for c in b["causes"])
+    v = diagnose(client, sid, h, answers=["Phase loss / undervoltage alarm", "Unequal between phases",
+                                          "Electrical hum or buzz from the motor", "Hot, above 90 °C on the body",
+                                          "Loose, burnt or discoloured terminal", "Matches the nameplate", "No change",
+                                          "Yes, done to the checklist", "The usual few", "Within the design window",
+                                          "Nothing leaking", "Flowing normally", "Normal", "Level OK, oil clean"])
+    finding = next(m for m in v["messages"] if m["type"] == "finding")
+    assert finding["direct_cause"].startswith("Power supply problem"), finding["direct_cause"]
+
+
+def test_an_operating_change_is_found(client):
+    from app.brain import TREES, find_cause
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|SLS|Decanter 2",
+               description="decanter tripping since the night shift pushed the feed up")
+    sid = v["session"]["id"]
+    v = diagnose(client, sid, h, limit=16, answers=[
+        "Above design — pushed for more output", "Overload relay tripped", "Setpoint, speed or feed changed",
+        "Yes, changed in the last few days", "Matches the nameplate", "Normal and balanced",
+        "Comes and goes as the feed changes", "Yes, flushed before stopping", "Much thicker or thinner, or flow surging",
+        "Torque hunting or tripping on high torque", "Quiet, oil clean and at level", "Yes, done to the checklist", "The usual few",
+        "IR above 100 MΩ, terminals clean and tight", "Warm, below 80 °C, no smell", "Both high, same as SCADA",
+        "Fresh grease, lubricator full and pumping", "Fresh, smooth solution; pump running steady",
+        "Firm dry cake, clear centrate", "Both below 75 °C"])
+    tree = TREES["Decanter"]
+    assert v["rca"] and find_cause(tree, v["rca"]["cause"])["domain"] == "operational", v["rca"]
 
 
 def diagnosis_state(sid):

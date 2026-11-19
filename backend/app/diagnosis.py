@@ -22,6 +22,7 @@ import zlib
 
 from . import config, db, escalation, knowledge, llm, media, safety, telemetry, topology
 from .brain import CATEGORY_LABEL, MAINTENANCE, conditions_for, find_cause, roots, tree_for
+from .brain.dsl import is_normal_answer
 from .catalog import SEVERITIES, SYMPTOM_BY_ID, report_hint, report_summary, symptom_labels, symptoms_for
 
 NOT_SURE = "Not sure"
@@ -213,6 +214,11 @@ def _answer_dist(q: dict, post: dict) -> list[float]:
     return probs
 
 
+# A check worth asking must be expected to change the picture by at least this much (nats of entropy); when none is,
+# the engine stops asking and proposes the best fit or says no listed cause fits, instead of running down the list
+MIN_GAIN = 0.015
+
+
 def pick_question(tree: dict, post: dict, asked: list[str], hint: str) -> dict | None:
     best, best_score = None, -1e9
     h0 = _entropy(post)
@@ -224,6 +230,8 @@ def pick_question(tree: dict, post: dict, asked: list[str], hint: str) -> dict |
             after = update_posterior(post, q, [i])
             exp_h += pa * _entropy(after)
         gain = h0 - exp_h
+        if gain < MIN_GAIN:
+            continue
         if q["keys"] and any(k in hint for k in q["keys"]):
             gain += 0.05
         if gain > best_score:
@@ -234,23 +242,6 @@ def pick_question(tree: dict, post: dict, asked: list[str], hint: str) -> dict |
 # Answers that describe a healthy reading. In the field most checks read normal, whatever the fault: the baseline
 # answer distribution gives these options NORMAL_SHARE of the probability, the rest is shared by the other options.
 NORMAL_SHARE = 0.5
-_NORMAL_START = re.compile(
-    r"^(normal|ok\b|fine(?! black| but)|good|clean|intact|smooth|stable|nothing|none\b|clear|tight|correct|"
-    r"steady(?! climb| stream)|within (design|life|schedule|the normal)|no (change|dust|lockouts|unusual|work)|"
-    r"dry(,|$)|tube matches|both agree|all (open|normal)|as usual|level ok|flow good|flowing normally|belts? |"
-    r"coupling fine|sharp|fresh|moves smoothly|yes, reaches|recently|0% lel|centred|quiet|even|same\b|at setpoint|"
-    r"uniform|a little, as usual|slight weep|moving evenly|below 70|both below|< ?10 ppm|2–5°c|above 95|agrees within|"
-    r"level 60|reads correctly|they agree|starts and runs normally|cycles normally|it does not trip|in service|"
-    r"just the usual|usual -|firm dry cake|full, even spray|brush intact|oil level ok|one running, normal|"
-    r"louvres open|inlet below 40|supply cold|o2 3–6|δt normal|yes — pot empty|yes, flows freely|yes, flushed|"
-    r"no, same|100% perimeter|well above the minimum|closed and locked)", re.I)
-
-
-def is_normal_answer(label: str) -> bool:
-    """An answer that describes a healthy reading (most field checks read like this, whatever the fault)."""
-    return bool(_NORMAL_START.match(label.strip()))
-
-
 def baseline(q: dict) -> list[float]:
     """P(answer) when the check says nothing about the fault: healthy readings are the common ones."""
     if "_p0" not in q:
@@ -435,8 +426,8 @@ def causes_view(tree: dict, post: dict, excluded: list[str]) -> list[dict]:
     meta = {c["id"]: c for c in tree["causes"]}
     items = [(c, p) for c, p in post.items() if c not in excluded and c in meta]
     items.sort(key=lambda x: -x[1])
-    return [{"id": c, "label": meta[c]["label"], "category": meta[c].get("category", "Machine"), "likelihood": round(p, 3)}
-            for c, p in items[:4]]
+    return [{"id": c, "label": meta[c]["label"], "category": meta[c].get("category", "Machine"),
+             "domain": meta[c].get("domain"), "likelihood": round(p, 3)} for c, p in items[:4]]
 
 
 def fishbone(tree: dict, post: dict, excluded: list[str]) -> list[dict]:
@@ -445,7 +436,8 @@ def fishbone(tree: dict, post: dict, excluded: list[str]) -> list[dict]:
     for c in tree["causes"]:
         p = post.get(c["id"], 0.0)
         bones.setdefault(c.get("category", "Machine"), []).append(
-            {"id": c["id"], "label": c["label"], "likelihood": round(p, 3), "ruled_out": c["id"] in excluded or p < 0.03})
+            {"id": c["id"], "label": c["label"], "domain": c.get("domain"), "likelihood": round(p, 3),
+             "ruled_out": c["id"] in excluded or p < 0.03})
     return [{"category": k, "label": CATEGORY_LABEL.get(k, k), "causes": sorted(v, key=lambda x: -x["likelihood"])}
             for k, v in bones.items()]
 
@@ -1373,7 +1365,7 @@ _STOP_LIMITS = (f"If it is still running and gets worse — vibration above {con
                 "above 85 °C, a new leak, smell or noise — stop it and make it safe.")
 
 
-BEST_FIT_MIN, BEST_FIT_LEAD, BEST_FIT_OTHER = 0.60, 3.0, 0.20
+BEST_FIT_MIN, BEST_FIT_LEAD, BEST_FIT_OTHER = 0.50, 2.0, 0.20
 
 
 def clear_leader(post: dict, excluded: list[str] | None = None) -> str | None:
@@ -1762,6 +1754,11 @@ def _bot_system(s: dict, area: dict, eq: dict) -> str:
         "METHOD",
         "- The field operator does not decide what to do next: YOU direct them. They follow your instruction and "
         "report what they found.",
+        "- Consider every kind of cause, not only mechanical ones: ELECTRICAL (supply / lost phase, motor winding or "
+        "insulation, starter / VFD, protection settings, controls and interlocks) and OPERATIONAL (run outside its "
+        "design duty, start-up / line-up not to the SOP, a recent operating change, too many starts or trip resets). "
+        "The fishbone below includes them; a trip, a won't-start, a hot or smelling motor, or a problem that began "
+        "after a change points there first.",
         "- stage 'fishbone': every turn, `reply` acknowledges the last answer and says what it means (no question, "
         "no list of options). `instruction` is ONE concrete physical check, written as a direction ending in what to "
         "report, e.g. \"With the pump isolated under LOTO, look at the seal face: is it scored or chipped?\". It is the "

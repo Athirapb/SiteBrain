@@ -32,6 +32,11 @@ for _name in GROUPS:
     CONDITIONS.extend(getattr(_m, "CONDITIONS", []))
     CASES.extend(getattr(_m, "CASES", []))
 
+# Electrical and operational causes and checks shared by every equipment type (common.py)
+from . import common  # noqa: E402
+
+common.extend(TREES)
+
 
 # Adjustments learned from resolved sessions (app/learning.py); authored TREES are never modified.
 LEARNED: dict[str, dict] = {}
@@ -47,7 +52,7 @@ def set_learned(models: dict[str, dict]) -> None:
 def _apply(tree: dict, m: dict) -> dict:
     t = copy.deepcopy(tree)
     for c in t["causes"]:
-        c["prior"] = m["prior"].get(c["id"], 1.0)
+        c["prior"] = c.get("prior", 1.0) * m["prior"].get(c["id"], 1.0)
     for q in t["questions"]:
         for o in q["options"]:
             for cid, r in m["lik"].get(q["id"], {}).get(o["label"], {}).items():
@@ -71,4 +76,5 @@ def conditions_for(area_code: str | None) -> list[dict]:
 
 
 def find_cause(tree: dict, cause_id: str) -> dict | None:
+    cause_id = (tree.get("aliases") or {}).get(cause_id, cause_id)  # a cause split up since the session began
     return next((c for c in tree["causes"] if c["id"] == cause_id), None)
