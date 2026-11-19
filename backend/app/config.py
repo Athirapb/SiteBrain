@@ -64,6 +64,9 @@ EMBED_MIN_SIM = float(os.getenv("SITEBRAIN_EMBED_MIN_SIM", "0.6"))
 
 # Diagnostic loop policy (SRS §4.2)
 MAX_DIAGNOSTIC_TURNS = int(os.getenv("SITEBRAIN_MAX_TURNS", "5"))
+# Hard limit on field checks per session (answered or skipped): after this many SiteBrain stops asking and names the
+# most likely cause (the operator still agrees with it before any fix), or says none of the known causes fits
+MAX_CHECKS = int(os.getenv("SITEBRAIN_MAX_CHECKS", "7"))
 CONFIDENCE_THRESHOLD = float(os.getenv("SITEBRAIN_CONFIDENCE", "0.85"))
 # Vibration velocity limits (mm/s RMS) for rotary machines — ISO 10816 class II by default: up to the alert value is
 # acceptable for long-term running, between the two is the alert zone, above the stop value the machine is stopped.

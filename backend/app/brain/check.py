@@ -93,7 +93,7 @@ def check_structure(kind: str, tree: dict) -> list[str]:
 
 def simulate(tree: dict, cause: dict, hinted: bool = True) -> tuple[bool, int, str]:
     """(confirmed correctly, turns used, what happened)."""
-    from ..diagnosis import clear_leader, initial_posterior, pick_question, real_causes, update_posterior
+    from ..diagnosis import OTHER, clear_leader, initial_posterior, pick_question, real_causes, update_posterior
     from .dsl import is_normal_answer
 
     hint = " ".join(cause["keys"]) if hinted else ""
@@ -125,6 +125,10 @@ def simulate(tree: dict, cause: dict, hinted: bool = True) -> tuple[bool, int, s
         top = max(real, key=real.get)
         if real[top] >= config.CONFIDENCE_THRESHOLD:
             return top == cause["id"], turn, f"confirmed {top} at {real[top]:.0%}"
+        if turn >= config.MAX_CHECKS:  # the engine's check limit: it names the most likely cause
+            if post.get(OTHER, 0) > real[top]:
+                return False, turn, f"limit reached, no listed cause fits (best {top} at {real[top]:.0%})"
+            return top == cause["id"], turn, f"most likely {top} at {real[top]:.0%} after {turn} checks"
 
 
 def check_normal_options(tree: dict) -> list[str]:

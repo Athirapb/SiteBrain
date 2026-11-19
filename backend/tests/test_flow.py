@@ -1442,6 +1442,21 @@ def test_a_process_cause_is_found_not_a_machine_fault(client):
     finding = next(m for m in v["messages"] if m["type"] == "finding")
     assert finding["direct_cause"].startswith("Gas or air in the suction"), finding["direct_cause"]
 
+@pytest.mark.parametrize("pick", ["first", "skip"])
+def test_troubleshooting_concludes_within_the_check_limit(client, pick):
+    """Whatever the answers — even skipping every check — SiteBrain names a cause or says none fits by check 7."""
+    h = login(client, "operator1")
+    v = report(client, h, equipment_id="GPS-BUU-04|D3|D3 RC Pump 1", symptoms=["noise"])
+    sid = v["session"]["id"]
+    asked = 0
+    while v["phase"] == "diagnose" and not any(m["type"] in ("finding", "root_cause") for m in v["messages"]):
+        replies = last_replies(v)
+        assert replies and asked < config.MAX_CHECKS == 7, f"still asking after {asked} checks"
+        asked += 1
+        v = say(client, sid, CANT if pick == "skip" else replies[0], h)
+    assert any(m["type"] in ("finding", "root_cause") for m in v["messages"]) or v["phase"] == "nff"
+    assert diagnosis_state(sid)["checks"] <= 7
+
 # runs last: the migration replaces the users
 def test_v2_database_migrates_keeping_its_issues(client):
     """A v2 database (username sign-in, CDT & PST as one area) is migrated in place, not rebuilt."""

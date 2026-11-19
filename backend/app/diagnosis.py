@@ -485,9 +485,18 @@ def _reasoning(s: dict, tree: dict, before: dict, after: dict) -> str:
     return " ".join(parts)
 
 
+def checks_posed(st: dict) -> int:
+    return st.get("checks", 0)
+
+
 def _ask(s: dict, q: dict, who: str = "SiteBrain", expert: bool = False, lead: str = "") -> None:
     """Ask one field check, with why it matters and an offer to explain how to do it. The operator may pick
-    several of its options when more than one applies (multi)."""
+    several of its options when more than one applies (multi). Once MAX_CHECKS have been asked, conclude instead."""
+    if checks_posed(s["state"]) >= config.MAX_CHECKS:
+        _conclude(s, who, expert, lead=lead.removesuffix("Next:").removesuffix("Now,").removesuffix("One more thing:")
+                  .removesuffix("Next check:").removesuffix("To narrow it down further:").strip())
+        return
+    s["state"]["checks"] = checks_posed(s["state"]) + 1
     s["state"]["pending"] = q["id"]
     add_msg(s["id"], "agent", who=who, expert=expert, text=f"{lead} {q['text']}".strip(), prompt=q["text"],
             purpose=q.get("purpose"), multi=True,
@@ -900,6 +909,7 @@ def _ask_survey(s: dict, area: dict, eq: dict) -> bool:
     if len(qs) < 2:
         return False
     st["survey"], st["pending"] = [q["id"] for q in qs], None
+    st["checks"] = checks_posed(st) + len(qs)
     add_msg(s["id"], "survey", who="SiteBrain",
             text=f"These {len(qs)} checks together tell the detailed causes. Do the ones you can — one at a time.",
             questions=[{"id": q["id"], "text": q["text"], "purpose": q.get("purpose"), "how": q.get("how"),
@@ -1638,6 +1648,24 @@ def _out_of_checks(s: dict, tree: dict, who: str = "SiteBrain", expert: bool = F
         _no_fault_found(s, tree, who, expert, lead=lead)
 
 
+def _conclude(s: dict, who: str = "SiteBrain", expert: bool = False, lead: str = "") -> None:
+    """The check limit is reached: name the most likely cause now (the operator agrees or not before any fix), unless
+    what was seen fits nothing in the knowledge base better than any listed cause — then say so."""
+    st = s["state"]
+    area, eq = load_area(s["area_id"]), session_eq(s)
+    tree = _tree(s, eq)
+    st["pending"] = None
+    real = {c: p for c, p in real_causes(st["posterior"]).items() if c not in st.get("excluded", [])}
+    if not real or st["posterior"].get(OTHER, 0) > max(real.values()):
+        _no_fault_found(s, tree, who, expert, lead=lead)
+        return
+    s["causes"] = causes_view(tree, st["posterior"], st.get("excluded", []))
+    s["confidence"] = s["causes"][0]["likelihood"] if s["causes"] else 0
+    n = checks_posed(st)
+    _confirm_cause(s, area, eq, tree, who, expert,
+                   lead=f"{lead} That's {n} checks — enough to call it.".strip())
+
+
 def _outside_knowledge(st: dict) -> bool:
     """The listed causes no longer explain what the operator sees."""
     return len(st.get("answers", [])) >= OTHER_MIN_ANSWERS and st["posterior"].get(OTHER, 0) >= OTHER_LIMIT
@@ -1695,12 +1723,16 @@ def _no_fault_found(s: dict, tree: dict, who: str = "SiteBrain", expert: bool = 
 def _confirm_cause(s: dict, area: dict, eq: dict, tree: dict, who: str, expert: bool = False, lead: str = "") -> None:
     """The fishbone narrowed to one direct cause: give the immediate fix, then start asking why."""
     st = s["state"]
+    lead = re.sub(r"\s*My best guess is still [^()]*\(\d+%\), but I want to be sure\.", "", lead).strip()
     cause = find_cause(tree, s["causes"][0]["id"])
     st["pending"] = None
     add_msg(s["id"], "finding", who=who, expert=expert, direct_cause=cause["label"],
             category=cause.get("category", "Machine"), category_label=CATEGORY_LABEL.get(cause.get("category"), "Machine"),
             confidence=s["confidence"], steps=cause["steps"],
-            text=f"{lead} I'm fairly confident ({round(s['confidence'] * 100)}%) it's {cause['label'].lower()}.".strip())
+            text=(f"{lead} I'm fairly confident ({round(s['confidence'] * 100)}%) it's {cause['label'].lower()}."
+                  if s["confidence"] >= config.CONFIDENCE_THRESHOLD else
+                  f"{lead} The most likely cause is {cause['label'].lower()} (about {round(s['confidence'] * 100)}%)."
+                  ).strip())
     st["rca"] = {"cause": cause["id"], "direct_cause": cause["label"], "category": cause.get("category", "Machine"),
                  "chain": [], "node": []}
     if cause.get("case"):
@@ -2044,6 +2076,8 @@ def _bot_system(s: dict, area: dict, eq: dict) -> str:
         "- The fix is never given before the root cause is agreed: in stage 'done' the app shows the root cause and asks "
         "the field operator whether they agree, and only then gives your steps. If the history shows a proposed root "
         "cause the operator did not agree with, rule that cause out, go back to stage 'fishbone' and keep checking.",
+        f"- You may direct at most {config.MAX_CHECKS} checks in total ({checks_posed(s['state'])} so far). When the "
+        "limit is reached, commit to the most likely direct cause even below 0.85 (stage 'why') — never ask more.",
         "- When one direct cause reaches likelihood >= 0.85, set stage 'why', fill direct_cause, fishbone_category and "
         "immediate_actions (3-5 corrective steps), and ask the first WHY question (use the cause's 5-Why tree as a guide, "
         "but accept the field operator's own explanation). Quick replies = likely answers + \"Not sure\".",
@@ -2103,6 +2137,9 @@ def _llm_check(s: dict, area: dict, eq: dict, data: dict) -> None:
     model offers actions as answers or gives no instruction, ask the decision tree's next check instead."""
     st = s["state"]
     reply = (data.get("reply") or "").strip()
+    if checks_posed(st) >= config.MAX_CHECKS:
+        _llm_conclude(s, area, eq, reply)
+        return
     instruction = (data.get("instruction") or "").strip()
     results = [r.strip() for r in data.get("quick_replies") or [] if r.strip() and r.strip() != CANT]
     if instruction and results and _llm_repeats_check(s, eq, instruction, results):
@@ -2117,6 +2154,7 @@ def _llm_check(s: dict, area: dict, eq: dict, data: dict) -> None:
         if same and same["id"] not in st["asked"]:
             st["asked"].append(same["id"])
         st.setdefault("llm_checks", []).append({"text": instruction, "results": results[:4]})
+        st["checks"] = checks_posed(st) + 1
         add_msg(s["id"], "agent", who="SiteBrain", text=f"{reply} {instruction}".strip(), prompt=instruction,
                 purpose=data.get("purpose"), how=data.get("how"), multi=True,
                 replies=results[:4] + ([HOW] if data.get("how") else []) + [CANT])
@@ -2131,6 +2169,25 @@ def _llm_check(s: dict, area: dict, eq: dict, data: dict) -> None:
                 text=f"{reply} Tell me in your own words what you see at {eq['name']} right now — sound, temperature, "
                      "leaks, readings on the local gauges.".strip(),
                 prompt="What do you see?", replies=[CANT])
+
+
+def _llm_conclude(s: dict, area: dict, eq: dict, reply: str) -> None:
+    """The LLM wants another check past the limit: take its most likely cause as the direct cause and go on to the
+    5-Why from the knowledge brain (or straight to the root cause when the brain has no matching cause)."""
+    st = s["state"]
+    if not s["causes"]:
+        _no_fault_found(s, _tree(s, eq), "SiteBrain", False, lead=reply)
+        return
+    top = s["causes"][0]
+    cat = top.get("category") or "Machine"
+    add_msg(s["id"], "finding", who="SiteBrain", direct_cause=top["label"], category=cat,
+            category_label=CATEGORY_LABEL.get(cat, cat), confidence=s["confidence"], steps=[],
+            text=f"{reply} That's {checks_posed(st)} checks — enough to call it. The most likely cause is "
+                 f"{top['label'].lower()} (about {round(s['confidence'] * 100)}%).".strip())
+    st["rca"] = {"cause": None, "direct_cause": top["label"], "category": cat, "chain": [], "node": []}
+    st["pending"] = None
+    s["identified_at"] = s.get("identified_at") or db.now_iso()
+    _llm_why_fallback(s, area, eq)
 
 
 def _llm_bot_turn(s: dict, area: dict, eq: dict, text: str | None) -> bool:
